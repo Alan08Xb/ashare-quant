@@ -12,3 +12,7 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+# 选股结果/报告/历史数据（隐私，不提交到公开仓库）
+reports/
+docs/
+data/history/

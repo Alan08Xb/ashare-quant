@@ -23,21 +23,40 @@ import requests
 
 from .config import Config
 
-# 表格列定义（顺序即显示顺序；name 是行数据的 key，data_type 声明单元格类型）
-_TABLE_COLUMNS = [
+# ---- 选股结果表 ----
+# 排名 | 代码 | 名称 | 行业 | 现价 | 今涨跌 | 60日涨幅 | ROE% | 净利同比 | 毛利率 | PE | PB | 流通市值 | 换手 | 综合分
+_SEL_COLUMNS = [
     {"name": "rank", "display_name": "排名", "width": "auto", "data_type": "text"},
     {"name": "code", "display_name": "代码", "width": "auto", "data_type": "text"},
     {"name": "name", "display_name": "名称", "width": "auto", "data_type": "text"},
     {"name": "industry", "display_name": "行业", "width": "auto", "data_type": "text"},
     {"name": "price", "display_name": "现价", "width": "auto", "data_type": "text"},
     {"name": "pct", "display_name": "今涨跌", "width": "auto", "data_type": "text"},
+    {"name": "ret_60", "display_name": "60日涨幅", "width": "auto", "data_type": "text"},
+    {"name": "roe", "display_name": "ROE%", "width": "auto", "data_type": "text"},
+    {"name": "np_yoy", "display_name": "净利同比", "width": "auto", "data_type": "text"},
+    {"name": "gross_margin", "display_name": "毛利率", "width": "auto", "data_type": "text"},
     {"name": "pe", "display_name": "PE", "width": "auto", "data_type": "text"},
     {"name": "pb", "display_name": "PB", "width": "auto", "data_type": "text"},
-    {"name": "roe", "display_name": "ROE", "width": "auto", "data_type": "text"},
+    {"name": "floatcap", "display_name": "流通市值", "width": "auto", "data_type": "text"},
+    {"name": "turnover", "display_name": "换手", "width": "auto", "data_type": "text"},
     {"name": "score", "display_name": "综合分", "width": "auto", "data_type": "text"},
 ]
+_SEL_KEYS = ["rank", "code", "name", "industry", "price", "pct", "ret_60", "roe",
+             "np_yoy", "gross_margin", "pe", "pb", "floatcap", "turnover", "score"]
 
-_STOCK_KEYS = ["rank", "code", "name", "industry", "price", "pct", "pe", "pb", "roe", "score"]
+# ---- 深度校验表 ----
+# 代码 | 名称 | 建议买入 | 止损参考 | 筹码调整 | 规则建议 | 信号徽章
+_DEEP_COLUMNS = [
+    {"name": "code", "display_name": "代码", "width": "auto", "data_type": "text"},
+    {"name": "name", "display_name": "名称", "width": "auto", "data_type": "text"},
+    {"name": "buy", "display_name": "建议买入", "width": "auto", "data_type": "text"},
+    {"name": "stop", "display_name": "止损参考", "width": "auto", "data_type": "text"},
+    {"name": "chip_adj", "display_name": "筹码调整", "width": "auto", "data_type": "text"},
+    {"name": "rec", "display_name": "规则建议", "width": "auto", "data_type": "text"},
+    {"name": "badges", "display_name": "信号徽章", "width": "auto", "data_type": "text"},
+]
+_DEEP_KEYS = ["code", "name", "buy", "stop", "chip_adj", "rec", "badges"]
 
 
 def _num(v, fmt="{:.1f}"):
@@ -66,43 +85,55 @@ def _fmt_pct(v):
     return f"{f:+.2f}%"
 
 
-def _fmt_stock(t: dict, key: str) -> str:
-    """按列 key 格式化单只股票字段。"""
+def _fmt_sel(t: dict, key: str) -> str:
+    """选股结果表单元格格式化。"""
     if key == "rank":
         return _num(t.get("rank"), "{:.0f}")
-    if key == "pct":
-        return _fmt_pct(t.get("pct"))
+    if key in ("pct", "ret_60", "np_yoy"):
+        return _fmt_pct(t.get(key))
     if key == "price":
         return _num(t.get(key), "{:.2f}")
     if key == "pb":
         return _num(t.get(key), "{:.2f}")
-    if key in ("roe", "pe", "score"):
+    if key in ("roe", "gross_margin", "turnover"):
+        return _num(t.get(key), "{:.1f}")
+    if key == "floatcap":
+        fc = t.get("floatcap")
+        return _num((fc / 1e8) if fc else None, "{:.0f}亿")
+    if key in ("pe", "score"):
         return _num(t.get(key), "{:.2f}" if key == "score" else "{:.1f}")
     return str(t.get(key, "") or "")
 
 
-def _rec_style(rec: str) -> dict:
-    """规则建议用 lark_md + 内联颜色标签着色（质地好=绿，雷区=红，一般=灰）。
+def _badges_short(badges: str, max_len: int = 72) -> str:
+    """精简信号徽章：保留头 2 个 + 尾 2 个，中间用 … 概括（徽章多且长，飞书窄屏易换行）。"""
+    if not badges:
+        return "—"
+    parts = [p.strip() for p in badges.split("|") if p.strip()]
+    if not parts:
+        return "—"
+    if len(parts) <= 3:
+        return "、".join(parts)
+    head, tail = parts[:2], parts[-2:]
+    joined = "、".join(head + ["…"] + tail)
+    return joined if len(joined) <= max_len else "、".join(head + tail)
 
-    注意：div 的 fields 里 text 只接受 lark_md/plain_text 文本对象；
-    text_tag 是独立元素，不能直接当字段值，否则飞书报 11246/11310。
-    """
-    if "雷区" in rec:
-        color = "red"
-    elif "质地好" in rec or "优选" in rec:
-        color = "green"
-    else:
-        color = "grey"
-    return {"tag": "lark_md", "content": f"<font color='{color}'>{rec}</font>"}
 
-
-def _cell(text: str) -> dict:
-    """文本类型单元格：data_type=text 的列，单元格值就是纯字符串。"""
-    return text
+def _fmt_deep(d: dict) -> dict:
+    """深度校验表单元格格式化。"""
+    return {
+        "code": str(d.get("code", "")),
+        "name": str(d.get("name", "")),
+        "buy": _num(d.get("buy"), "{:.2f}"),
+        "stop": _num(d.get("stop"), "{:.2f}"),
+        "chip_adj": _num(d.get("chip_adj"), "{:+.2f}"),
+        "rec": str(d.get("rec", "")),
+        "badges": _badges_short(str(d.get("badges", ""))),
+    }
 
 
 def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
-               ai_text: str = "", page_url: str = "", n: int = 20) -> list:
+               ai_text: str = "", page_url: str = "", n: int = 30) -> list:
     """构造飞书卡片 elements 列表。"""
     bt = backtest or {}
 
@@ -117,59 +148,33 @@ def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
         lines.append(f"**自我检验**：历史快照 {int(bt['days'])} 个交易日，继续积累中…")
     elements = [{"tag": "markdown", "content": "\n".join(lines)}]
 
-    # ---- Top 表格：table 组件 ----
-    deep_map = {str(d.get("code")): d for d in deep if d} if deep else {}
-    # 飞书 table 的 rows 是"按列 name 为 key 的对象数组"，不是数组的数组，也不是 {cells:...}
-    table_rows = []
-    for t in top[:n]:
-        table_rows.append({k: _fmt_stock(t, k) for k in _STOCK_KEYS})
+    # ---- 选股结果表 ----
+    sel_rows = [{k: _fmt_sel(t, k) for k in _SEL_KEYS} for t in top[:n]]
     elements.append({
         "tag": "table",
         "page_size": 10,
         "row_height": "low",
-        "columns": _TABLE_COLUMNS,
-        "rows": table_rows,
+        "columns": _SEL_COLUMNS,
+        "rows": sel_rows,
     })
 
-    # ---- 深度校验：column_set 多列网格 ----
-    picks = []
+    # ---- 深度校验表 ----
+    deep_map = {str(d.get("code")): d for d in deep if d} if deep else {}
+    deep_rows = []
     for t in top[:n]:
         d = deep_map.get(str(t.get("code")))
-        if not d or not d.get("buy"):
-            continue
-        picks.append({
-            "title": f"{t.get('name','')}({str(t.get('code',''))})",
-            "buy": _num(d.get("buy"), "{:.2f}"),
-            "stop": _num(d.get("stop"), "{:.2f}"),
-            "rec": d.get("rec", ""),
-        })
-    if picks:
+        if d:
+            deep_rows.append(_fmt_deep(d))
+    if deep_rows:
         elements.append({"tag": "markdown",
-                         "content": "**深度校验（建议买入 / 止损参考）**"})
-        for i in range(0, len(picks), 2):
-            cols = []
-            for p in picks[i:i + 2]:
-                cols.append({
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [{
-                        "tag": "div",
-                        "fields": [
-                            {"is_short": True, "text": {"tag": "lark_md",
-                                                        "content": f"**{p['title']}**"}},
-                            {"is_short": True, "text": {"tag": "lark_md",
-                                                        "content": f"买 {p['buy']} / 损 {p['stop']}"}},
-                            {"is_short": True, "text": _rec_style(p["rec"])},
-                        ],
-                    }],
-                })
-            if len(cols) == 1:
-                cols.append({"tag": "column", "width": "weighted", "weight": 1,
-                             "elements": []})
-            elements.append({"tag": "column_set", "flex_mode": "none",
-                             "background_style": "grey",
-                             "columns": cols})
+                         "content": "**深度校验（买入 / 止损 / 筹码 / 建议 / 信号）**"})
+        elements.append({
+            "tag": "table",
+            "page_size": 10,
+            "row_height": "low",
+            "columns": _DEEP_COLUMNS,
+            "rows": deep_rows,
+        })
 
     # ---- AI 解读（自由文本，markdown 即可） ----
     if ai_text:
@@ -227,7 +232,7 @@ def push_latest(cfg: Config) -> int:
 
     # 可选：GitHub Pages 报告地址。整段 URL 建议在 GitHub Secret/变量里配置，避免手贴被转义。
     page_url = os.environ.get("PAGE_URL", "").strip()
-    n = int(os.environ.get("FEISHU_TOP", "20"))
+    n = int(os.environ.get("FEISHU_TOP", "30"))
 
     elements = build_card(top, meta, data.get("backtest", {}), deep, ai_text, page_url, n)
     return send_webhook(webhook, elements)

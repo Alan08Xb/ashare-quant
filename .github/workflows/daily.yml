@@ -2,10 +2,11 @@ name: daily-a-share-quant
 
 on:
   schedule:
-    # 每个交易日早上 09:35（北京时间 = UTC 01:35）运行
+    # 每个交易日早上 09:45（北京时间 = UTC 01:45）运行
     # 注意：09:15 集合竞价刚开盘，快照接口的“最新价”字段可能仍为空导致清洗后 0 只，
-    #       推迟到 09:35 连续竞价数据稳定后再跑。cron 周一至周五(1-5)，节假日因“无数据”自然跳过
-    - cron: '35 1 * * 1-5'
+    #       推迟到 09:45 连续竞价数据稳定后再跑。cron 周一至周五(1-5)，
+    #       节假日因“无数据”自然跳过（"无数据"时步骤退出、不推送、不提交）。
+    - cron: '45 1 * * 1-5'
   workflow_dispatch: {}   # 允许在 Actions 页手动点击运行
 
 permissions:
@@ -30,11 +31,11 @@ jobs:
       - name: 安装依赖
         run: pip install .
 
-      - name: 运行选股（自动生成报告 + 归档历史快照）
+      - name: 运行选股（生成报告供推送，结果不提交到仓库）
         env:
-          TOPN: '30'            # 输出 Top 30
+          TOPN: '50'            # 输出 Top 50
+          DEEP_TOP: '50'        # 对综合分前 50 名做深度校验
           MIN_AMOUNT: '50000000' # 成交额下限 5000 万
-          DEEP_TOP: '30'        # 对综合分前 30 名做深度校验
           # —— 可选：AI 解读。AI_API_KEY 请放在 仓库 Settings→Secrets→Actions，
           #    名称为 AI_API_KEY；留空则跳过 AI 步骤（不报错）。
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
@@ -42,25 +43,23 @@ jobs:
           AI_MODEL: ${{ vars.AI_MODEL }}
         run: python -m ashare_quant run
 
+      # 结果默认不推送到公开仓库（隐私）。若要开 GitHub Pages 网页报告，
+      # 把下面注释的"提交并推送报告"步骤恢复即可。
+      # - name: 提交并推送报告与历史数据
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      #     git add reports/ data/history/ docs/ 2>/dev/null || true
+      #     if git diff --cached --quiet; then
+      #       echo "今天没有变化，跳过提交"; exit 0
+      #     fi
+      #     git commit -m "每日选股报告 $(date -u +%F)"
+      #     git push
+
+      # 仅当选股成功才推送到飞书（休市/无数据时 run 退出，本步不执行）
       - name: 推送到飞书（可选）
-        if: always() && env.FEISHU_WEBHOOK != ''
+        if: success() && env.FEISHU_WEBHOOK != ''
         env:
-          # —— 飞书推送。FEISHU_WEBHOOK 放在 仓库 Settings→Secrets→Actions（名称为 FEISHU_WEBHOOK）。
-          #    不配则跳过本步（不影响报告生成与推送）。
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          # 可选：你的 GitHub Pages 报告地址，例如 https://用户名.github.io/ashare-quant/
-          #    放 Variables（名称为 PAGE_URL），给消息里附上完整报告链接。
           PAGE_URL: ${{ vars.PAGE_URL }}
         run: python -m ashare_quant feishu
-
-      - name: 提交并推送报告与历史数据
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/ data/history/ docs/ 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "今天没有变化（可能是休市或数据未更新），跳过提交"
-            exit 0
-          fi
-          git commit -m "每日选股报告 $(date -u +%F)"
-          git push

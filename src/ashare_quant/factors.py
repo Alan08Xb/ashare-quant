@@ -89,6 +89,18 @@ def size_neutralize(df: pd.DataFrame, factor: pd.Series, cfg: Config) -> pd.Seri
     return out
 
 
+def industry_policy_bonus(df: pd.DataFrame, cfg: Config) -> pd.Series:
+    """行业/产业政策因子：命中政策扶持行业关键词 → +1（再乘配置加成），否则 0。
+
+    作为独立因子列保留，综合分里以加法并入（可微调权重）。
+    """
+    ind = df["industry"].astype(str)
+    hit = pd.Series(0.0, index=df.index)
+    for kw in cfg.industry_bonus_kw:
+        hit = hit.where(~ind.str.contains(kw, na=False, case=False), cfg.industry_bonus)
+    return hit
+
+
 def compute_factors(df: pd.DataFrame, cfg: Config, vol_map: dict | None = None) -> pd.DataFrame:
     """输入清洗后的股票池，输出带各因子原始分与综合分的 DataFrame。vol_map: {code: close_Series}。"""
     d = df.copy()
@@ -97,10 +109,12 @@ def compute_factors(df: pd.DataFrame, cfg: Config, vol_map: dict | None = None) 
     d["f_quality"] = _raw_quality(d)
     d["f_momentum"] = _raw_momentum(d)
     d["f_lowvol"] = _raw_lowvol(d, vol_map)
+    d["f_industry"] = industry_policy_bonus(d, cfg)
 
     # 市值中性化（可选）
     for c in ["f_value", "f_quality", "f_momentum", "f_lowvol"]:
         d[c] = size_neutralize(d, d[c], cfg)
+    # 行业政策因子不中性化（本身是离散政策性加分）
 
     # 综合分
     d["score"] = (
@@ -108,6 +122,7 @@ def compute_factors(df: pd.DataFrame, cfg: Config, vol_map: dict | None = None) 
         + cfg.w_quality * d["f_quality"]
         + cfg.w_momentum * d["f_momentum"]
         + cfg.w_lowvol * d["f_lowvol"]
+        + d["f_industry"]
     )
     d["rank"] = d["score"].rank(ascending=False, method="first")
     return d

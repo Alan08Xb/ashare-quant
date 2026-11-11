@@ -97,6 +97,24 @@ def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
     cost_line = float((close * w).sum())             # 平均成本（筹码加权均价）
     dev_cost = last / cost_line - 1 if cost_line > 0 else np.nan
 
+    # 60 日筹码成本均线：仅用最近 60 根 K 线重算，作为"主力近期建仓成本"近似
+    k60 = k.tail(60).copy()
+    c60 = k60["close"].values
+    t60 = np.nan_to_num(k60["turnover"].values, nan=0.0).clip(0, 3) / 100.0
+    m = len(k60)
+    w60 = np.zeros(m)
+    for i in range(m):
+        f = t60[i]
+        surv = 1.0
+        for j in range(i + 1, m):
+            surv *= max(1.0 - t60[j], 0.0)
+        w60[i] = f * surv
+    if w60.sum() > 1e-9:
+        w60 = w60 / w60.sum()
+        main_cost = float((c60 * w60).sum())
+    else:
+        main_cost = float(np.nan)
+
     # 峰数判定（在价格直方图上找局部峰）
     bins = 60
     edges = np.linspace(close.min(), close.max(), bins + 1)
@@ -124,6 +142,7 @@ def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
         "ok": True,
         "profit": profit,
         "cost_line": cost_line,
+        "main_cost": main_cost,          # 60 日主力筹码成本均线
         "close_vs_cost": dev_cost,
         "peak_state": peak_state,
         "chip_lo": lo9,
@@ -142,6 +161,19 @@ def _annual(mf: pd.DataFrame) -> pd.DataFrame:
     return mf[mf["_dt"].dt.month == 12]
 
 
+def _wsum(vals: list, w: tuple) -> float | None:
+    """对最近 3 期做加权；权重归一化（0.6/0.2/0.2）。缺期则跳过该期并重新归一。"""
+    import math
+    pairs = [(a, b) for a, b in zip(vals, w)
+             if a is not None and not (isinstance(a, float) and math.isnan(a))]
+    if not pairs:
+        return None
+    tot = sum(p for _, p in pairs)
+    if tot <= 0:
+        return None
+    return float(sum(v * p for v, p in pairs) / tot)
+
+
 def fundamental(code: str, cfg: Config) -> dict:
     mf = fetch_main_finance(code)
     bl = fetch_balance(code)
@@ -149,23 +181,33 @@ def fundamental(code: str, cfg: Config) -> dict:
 
     if not mf.empty:
         mf["_dt"] = pd.to_datetime(mf["REPORT_DATE"], errors="coerce")
-        latest = mf.sort_values("_dt").iloc[-1]
+        mf = mf.dropna(subset=["_dt"]).sort_values("_dt")
+        latest = mf.iloc[-1]
+        # 最近 3 个报告期（最新在前），用于 0.6/0.2/0.2 加权
+        last3 = list(mf.tail(3).iloc[::-1].to_dict("records"))
+        roe_w = _wsum([x.get("ROEJQ") for x in last3], cfg.fin_w)
+        gm_w = _wsum([x.get("XSMLL") for x in last3], cfg.fin_w)
+        debt_w = _wsum([x.get("ZCFZL") for x in last3], cfg.fin_w)
+        cf_w = _wsum(
+            [x.get("MGJYXJJE") / x.get("EPSJB") if x.get("EPSJB") and x.get("EPSJB") > 0
+             else None for x in last3], cfg.fin_w)
         ann = _annual(mf).sort_values("_dt")
         # ROE 连续 N 年 ≥ 阈值（取最近最多 3 个年报）
         roe_vals = ann["ROEJQ"].dropna().tail(3).tolist()
         roe_n = int(sum(1 for v in roe_vals if v >= cfg.roe_min)) if roe_vals else 0
         roe_years = len(roe_vals)
-        # 现金流 / 净利（用年报，最接近整年口径）
-        ann_latest = ann.sort_values("_dt").iloc[-1] if not ann.empty else latest
+        ann_latest = ann.iloc[-1] if not ann.empty else latest
         eps, cf = ann_latest.get("EPSJB", np.nan), ann_latest.get("MGJYXJJE", np.nan)
         cash_ratio = (cf / eps) if (pd.notna(eps) and pd.notna(cf) and eps > 0) else np.nan
         r.update({
             "ok": True,
             "roe_n": roe_n, "roe_years": roe_years,
             "roe_recent": float(ann_latest["ROEJQ"]) if pd.notna(ann_latest.get("ROEJQ")) else np.nan,
+            "roe_w": roe_w,                # 三期加权 ROE
             "cash_ratio": cash_ratio,
-            "gross_margin": float(latest["XSMLL"]) if pd.notna(latest.get("XSMLL")) else np.nan,
-            "debt": float(latest["ZCFZL"]) if pd.notna(latest.get("ZCFZL")) else np.nan,
+            "cash_ratio_w": cf_w,          # 三期加权 经营现金/净利
+            "gross_margin": gm_w,          # 三期加权毛利率
+            "debt": debt_w,                # 三期加权负债率
             "np_yoy": float(latest["PARENTNETPROFITTZ"]) if pd.notna(latest.get("PARENTNETPROFITTZ")) else np.nan,
             "revenue_yoy": float(latest["TOTALOPERATEREVETZ"]) if pd.notna(latest.get("TOTALOPERATEREVETZ")) else np.nan,
             "ar_ratio": float(latest["YSZKYYSR"]) if pd.notna(latest.get("YSZKYYSR")) else np.nan,
@@ -237,24 +279,32 @@ def fund_holding(code: str, cfg: Config) -> dict:
 
 
 def buy_zone(k: pd.DataFrame, chip: dict) -> dict:
-    """建议买入价 / 止损价：以 20 日线与筹码成本均线的较高者为支撑参考。
+    """建议买入价 / 止损价：以 20 日线与 60 日筹码成本均线的较高者为支撑参考。
 
-    - 现价在 20 日线上：支撑 = max(20日线, 成本均线)，建议买入=支撑，止损=支撑下方 5%
-    - 现价跌破 20 日线：支撑 = 20 日线，挂单价=20 日线（等站稳再买），止损参考=其下 5%
+    参考列：
+      - ma20      20 日均线
+      - cost_line  筹码成本均线（全窗口加权）
+      - main_cost  主力筹码成本均线（近 60 日加权）
+    建议买入 = max(ma20, main_cost)；现价跌破 20 日线时以 20 日线为买点（等站上）。
     """
     if k.empty or len(k) < 25:
-        return {"buy": None, "stop": None, "ref": None}
+        return {"buy": None, "stop": None, "ma20": None, "cost_line": None, "main_cost": None}
     close = k["close"]
     ma20 = close.rolling(20).mean().iloc[-1]
     cost = chip.get("cost_line") if chip and chip.get("ok") else np.nan
-    refs = [v for v in (ma20, cost) if pd.notna(v) and v > 0]
-    support = max(refs) if refs else float("nan")
+    main_cost = chip.get("main_cost") if chip and chip.get("ok") else np.nan
+    # 支撑参考：20 日线 与 主力(60日)筹码成本均线的较高者
+    refs = [v for v in (ma20, main_cost) if pd.notna(v) and v > 0]
+    support = max(refs) if refs else (float(ma20) if pd.notna(ma20) else float("nan"))
     last = close.iloc[-1]
     if last < ma20:                     # 空头/跌破：以 20 日线为买点(等站上)
         buy, stop = float(ma20), float(ma20) * 0.95
     else:
         buy, stop = float(support), float(support) * 0.95
-    return {"buy": round(buy, 2), "stop": round(stop, 2), "ref": round(support, 2)}
+    return {"buy": round(buy, 2), "stop": round(stop, 2),
+            "ma20": round(float(ma20), 2) if pd.notna(ma20) else None,
+            "cost_line": round(float(cost), 2) if pd.notna(cost) else None,
+            "main_cost": round(float(main_cost), 2) if pd.notna(main_cost) else None}
 
 
 def chip_adjust(d: dict, cfg: Config) -> float:
@@ -385,6 +435,9 @@ def deep_check(candidates: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         d["fund_bonus"] = fh.get("bonus", 0.0)
         d["fund_state"] = "新增" if fh.get("new") else ("持有" if fh.get("hold") else "无")
         d["buy"], d["stop"] = bz.get("buy"), bz.get("stop")
+        d["ma20"] = bz.get("ma20")
+        d["cost_line"] = bz.get("cost_line")
+        d["main_cost"] = bz.get("main_cost")
         d["code"], d["name"] = code, s.get("name")
         d["chip_adj"] = chip_adjust(d, cfg)
         badges, rec = _badges(d, cfg)

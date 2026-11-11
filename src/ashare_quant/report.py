@@ -105,7 +105,7 @@ def render_markdown(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.Data
             lines.append("")
     lines += ["",
         "---",
-        "*仅供自用研究参考，不构成投资建议。工具会随运行自动积累历史并回测自身有效性。*",
+        "*仅供研究参考，不构成投资建议。工具会随运行自动积累历史并回测自身有效性。*",
         "",
     ]
     return "\n".join(lines)
@@ -201,7 +201,7 @@ td.big{{font-size:20px;font-weight:700;color:var(--acc)}}
   <tbody>{tbody}</tbody></table></div>
 </div>
 {deep_html}
-<p class="disclaimer">仅供自用研究参考，不构成投资建议。数据来自东方财富公开接口，可能存在缺失或延迟。</p>
+<p class="disclaimer">仅供研究参考，不构成投资建议。数据来自东方财富公开接口，可能存在缺失或延迟。</p>
 </div></body></html>"""
 
 
