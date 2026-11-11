@@ -82,12 +82,17 @@ def _fmt_stock(t: dict, key: str) -> str:
 
 
 def _rec_style(rec: str) -> dict:
-    """按规则建议给文字上色：质地好=绿，雷区=红，一般=灰。"""
+    """按规则建议给文字上色：质地好=绿，雷区=红，一般=灰。
+
+    text_tag 的 text 必须是结构化文本对象（tag+content），不能是裸字符串，
+    否则飞书报 11246/11310 'text must have content'。
+    """
+    text_obj = {"tag": "plain_text", "content": rec}
     if "雷区" in rec:
-        return {"tag": "text_tag", "text": rec, "color": "red"}
+        return {"tag": "text_tag", "text": text_obj, "color": "red"}
     if "质地好" in rec or "优选" in rec:
-        return {"tag": "text_tag", "text": rec, "color": "green"}
-    return {"tag": "plain_text", "content": rec}
+        return {"tag": "text_tag", "text": text_obj, "color": "green"}
+    return text_obj
 
 
 def _cell(text: str) -> dict:
