@@ -23,18 +23,18 @@ import requests
 
 from .config import Config
 
-# 表格列定义（顺序即显示顺序）；宽屏下用 wide_screen_mode 可左右滚动
+# 表格列定义（顺序即显示顺序；name 是行数据的 key，data_type 声明单元格类型）
 _TABLE_COLUMNS = [
-    {"name": "排名", "display_name": "排名", "width": "auto"},
-    {"name": "代码", "display_name": "代码", "width": "auto"},
-    {"name": "名称", "display_name": "名称", "width": "auto"},
-    {"name": "行业", "display_name": "行业", "width": "auto"},
-    {"name": "现价", "display_name": "现价", "width": "auto"},
-    {"name": "今涨跌", "display_name": "今涨跌", "width": "auto"},
-    {"name": "PE", "display_name": "PE", "width": "auto"},
-    {"name": "PB", "display_name": "PB", "width": "auto"},
-    {"name": "ROE", "display_name": "ROE", "width": "auto"},
-    {"name": "综合分", "display_name": "综合分", "width": "auto"},
+    {"name": "rank", "display_name": "排名", "width": "auto", "data_type": "text"},
+    {"name": "code", "display_name": "代码", "width": "auto", "data_type": "text"},
+    {"name": "name", "display_name": "名称", "width": "auto", "data_type": "text"},
+    {"name": "industry", "display_name": "行业", "width": "auto", "data_type": "text"},
+    {"name": "price", "display_name": "现价", "width": "auto", "data_type": "text"},
+    {"name": "pct", "display_name": "今涨跌", "width": "auto", "data_type": "text"},
+    {"name": "pe", "display_name": "PE", "width": "auto", "data_type": "text"},
+    {"name": "pb", "display_name": "PB", "width": "auto", "data_type": "text"},
+    {"name": "roe", "display_name": "ROE", "width": "auto", "data_type": "text"},
+    {"name": "score", "display_name": "综合分", "width": "auto", "data_type": "text"},
 ]
 
 _STOCK_KEYS = ["rank", "code", "name", "industry", "price", "pct", "pe", "pb", "roe", "score"]
@@ -97,7 +97,8 @@ def _rec_style(rec: str) -> dict:
 
 
 def _cell(text: str) -> dict:
-    return {"tag": "text", "text": {"tag": "plain_text", "content": text}}
+    """文本类型单元格：data_type=text 的列，单元格值就是纯字符串。"""
+    return text
 
 
 def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
@@ -118,14 +119,14 @@ def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
 
     # ---- Top 表格：table 组件 ----
     deep_map = {str(d.get("code")): d for d in deep if d} if deep else {}
+    # 飞书 table 的 rows 是"按列 name 为 key 的对象数组"，不是数组的数组，也不是 {cells:...}
     table_rows = []
     for t in top[:n]:
-        # 飞书 table 的 rows 必须是数组的数组：每行 = 单元格数组，不是 {cells:[...]} 对象
-        table_rows.append([_cell(_fmt_stock(t, k)) for k in _STOCK_KEYS])
+        table_rows.append({k: _fmt_stock(t, k) for k in _STOCK_KEYS})
     elements.append({
         "tag": "table",
-        "page_style": {"size": "lg", "page_split_mode": "default"},
-        "column_count": len(_TABLE_COLUMNS),
+        "page_size": 10,
+        "row_height": "low",
         "columns": _TABLE_COLUMNS,
         "rows": table_rows,
     })
