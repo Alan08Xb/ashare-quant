@@ -1,0 +1,2 @@
+# 让 Git 在 Windows 上检出时保持 LF，避免 CRLF 反复刷警告
+* text=auto eol=lf
