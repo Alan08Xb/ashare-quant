@@ -1,11 +1,16 @@
 """推送每日选股结果到飞书（自定义机器人 Webhook）。
 
-用法：
-  1. 在飞书群 设置→群机器人→添加机器人→自定义机器人，复制 Webhook 地址
-  2. 把 Webhook 放进环境变量 FEISHU_WEBHOOK（GitHub Actions 里放 Secret）
-  3. python -m ashare_quant feishu
+飞书卡片 markdown 元素**不支持表格语法**（`| a | b |` 会按普通文本错行）。
+所以这里用飞书卡片的原生结构化组件排版：
+  - `table`       渲染 Top 股票表格（列对齐、不换行、可横向滚动）
+  - `column_set`  把深度校验买点排成多列网格
+  - AI 解读等自由文本用 `markdown` 组件
+  - 注意：标题/表格各字段内容里**不要带换行**，否则仍会错行。
 
-依赖：requests（项目已有）。飞书自定义机器人单条卡片消息上限 150KB。
+用法：
+  1. 飞书群 设置→群机器人→自定义机器人，复制 Webhook
+  2. 设环境变量 FEISHU_WEBHOOK（GitHub Actions 里放 Secret）
+  3. python -m ashare_quant feishu
 """
 
 from __future__ import annotations
@@ -17,6 +22,22 @@ import sys
 import requests
 
 from .config import Config
+
+# 表格列定义（顺序即显示顺序）；宽屏下用 wide_screen_mode 可左右滚动
+_TABLE_COLUMNS = [
+    {"name": "排名", "display_name": "排名", "width": "auto"},
+    {"name": "代码", "display_name": "代码", "width": "auto"},
+    {"name": "名称", "display_name": "名称", "width": "auto"},
+    {"name": "行业", "display_name": "行业", "width": "auto"},
+    {"name": "现价", "display_name": "现价", "width": "auto"},
+    {"name": "今涨跌", "display_name": "今涨跌", "width": "auto"},
+    {"name": "PE", "display_name": "PE", "width": "auto"},
+    {"name": "PB", "display_name": "PB", "width": "auto"},
+    {"name": "ROE", "display_name": "ROE", "width": "auto"},
+    {"name": "综合分", "display_name": "综合分", "width": "auto"},
+]
+
+_STOCK_KEYS = ["rank", "code", "name", "industry", "price", "pct", "pe", "pb", "roe", "score"]
 
 
 def _num(v, fmt="{:.1f}"):
@@ -45,68 +66,120 @@ def _fmt_pct(v):
     return f"{f:+.2f}%"
 
 
-def build_text(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
-               ai_text: str = "", page_url: str = "", n: int = 20) -> str:
-    """拼一段飞书 markdown 文本（表格 + 摘要 + AI 解读）。"""
-    lines = [f"# A股多因子选股 · {meta.get('generated_date', '')}",
-             "",
-             f"> 股票池：{meta.get('universe', '—')}"]
+def _fmt_stock(t: dict, key: str) -> str:
+    """按列 key 格式化单只股票字段。"""
+    if key == "rank":
+        return _num(t.get("rank"), "{:.0f}")
+    if key == "pct":
+        return _fmt_pct(t.get("pct"))
+    if key == "price":
+        return _num(t.get(key), "{:.2f}")
+    if key == "pb":
+        return _num(t.get(key), "{:.2f}")
+    if key in ("roe", "pe", "score"):
+        return _num(t.get(key), "{:.2f}" if key == "score" else "{:.1f}")
+    return str(t.get(key, "") or "")
 
+
+def _rec_style(rec: str) -> dict:
+    """按规则建议给文字上色：质地好=绿，雷区=红，一般=灰。"""
+    if "雷区" in rec:
+        return {"tag": "text_tag", "text": rec, "color": "red"}
+    if "质地好" in rec or "优选" in rec:
+        return {"tag": "text_tag", "text": rec, "color": "green"}
+    return {"tag": "plain_text", "content": rec}
+
+
+def _cell(text: str) -> dict:
+    return {"tag": "text", "text": {"tag": "plain_text", "content": text}}
+
+
+def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
+               ai_text: str = "", page_url: str = "", n: int = 20) -> list:
+    """构造飞书卡片 elements 列表。"""
     bt = backtest or {}
+
+    # ---- 顶部：股票池 + 自我检验摘要 ----
+    lines = [f"**股票池**：{meta.get('universe', '—')}"]
     if bt.get("ok"):
-        lines.append("> 自我检验：分组差 "
-                     f"{_num(bt.get('spread_mean'), '{:.2%}')} | RankIC "
-                     f"{_num(bt.get('ic_mean'), '{:.3f}')} | ICIR "
-                     f"{_num(bt.get('icir'), '{:.2f}')} | 多头占优 "
-                     f"{_num(bt.get('hit_rate'), '{:.0%}')}")
-    elif bt.get("days"):
-        lines.append(f"> 自我检验：历史快照 {int(bt['days'])} 个交易日，继续积累中…")
-
-    lines += ["",
-              "| 排名 | 代码 | 名称 | 行业 | 现价 | 今涨跌 | PE | PB | ROE | 综合分 |",
-              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
-
-    deep_map = {d.get("code"): d for d in deep if d} if deep else {}
-    for t in top[:n]:
-        code = t.get("code", "")
-        d = deep_map.get(str(code), {})
-        rec = d.get("rec", "")
-        name = t.get("name", "")
-        # 雷区类加红标提示，质地好加绿标
-        mark = ""
-        if "雷区" in rec:
-            mark = "❌"
-        elif "质地好" in rec or "优选" in rec:
-            mark = "✅"
         lines.append(
-            f"| {t.get('rank','')} | {code} | {name}{mark} | {t.get('industry','')} "
-            f"| {_num(t.get('price'), '{:.2f}')} | {_fmt_pct(t.get('pct'))} "
-            f"| {_num(t.get('pe'), '{:.1f}')} | {_num(t.get('pb'), '{:.2f}')} "
-            f"| {_num(t.get('roe'), '{:.1f}')} | {_num(t.get('score'), '{:.2f}')} |")
+            f"**自我检验**：分组差 {_num(bt.get('spread_mean'), '{:.2%}')} · "
+            f"RankIC {_num(bt.get('ic_mean'), '{:.3f}')} · ICIR "
+            f"{_num(bt.get('icir'), '{:.2f}')} · 多头占优 {_num(bt.get('hit_rate'), '{:.0%}')}")
+    elif bt.get("days"):
+        lines.append(f"**自我检验**：历史快照 {int(bt['days'])} 个交易日，继续积累中…")
+    elements = [{"tag": "markdown", "content": "\n".join(lines)}]
 
-    if deep_map:
-        lines += ["", "**深度校验**（建议买入 / 止损参考）："]
-        rows = []
-        for t in top[:n]:
-            d = deep_map.get(str(t.get("code")))
-            if not d or not d.get("buy"):
-                continue
-            rows.append(f"{t.get('name')}({t.get('code')}) 买{_num(d.get('buy'),'{:.2f}')}/"
-                        f"损{_num(d.get('stop'),'{:.2f}')} · {d.get('rec','')}")
-        if rows:
-            lines += ["- " + r for r in rows]
+    # ---- Top 表格：table 组件 ----
+    deep_map = {str(d.get("code")): d for d in deep if d} if deep else {}
+    table_rows = []
+    for t in top[:n]:
+        table_rows.append({
+            "template": "blue",
+            "cells": [_cell(_fmt_stock(t, k)) for k in _STOCK_KEYS],
+        })
+    elements.append({
+        "tag": "table",
+        "page_style": {"size": "lg", "page_split_mode": "default"},
+        "column_count": len(_TABLE_COLUMNS),
+        "columns": _TABLE_COLUMNS,
+        "rows": table_rows,
+    })
 
+    # ---- 深度校验：column_set 多列网格 ----
+    picks = []
+    for t in top[:n]:
+        d = deep_map.get(str(t.get("code")))
+        if not d or not d.get("buy"):
+            continue
+        picks.append({
+            "title": f"{t.get('name','')}({str(t.get('code',''))})",
+            "buy": _num(d.get("buy"), "{:.2f}"),
+            "stop": _num(d.get("stop"), "{:.2f}"),
+            "rec": d.get("rec", ""),
+        })
+    if picks:
+        elements.append({"tag": "markdown",
+                         "content": "**深度校验（建议买入 / 止损参考）**"})
+        for i in range(0, len(picks), 2):
+            cols = []
+            for p in picks[i:i + 2]:
+                cols.append({
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [{
+                        "tag": "div",
+                        "fields": [
+                            {"is_short": True, "text": {"tag": "lark_md",
+                                                        "content": f"**{p['title']}**"}},
+                            {"is_short": True, "text": {"tag": "lark_md",
+                                                        "content": f"买 {p['buy']} / 损 {p['stop']}"}},
+                            {"is_short": True, "text": _rec_style(p["rec"])},
+                        ],
+                    }],
+                })
+            if len(cols) == 1:
+                cols.append({"tag": "column", "width": "weighted", "weight": 1,
+                             "elements": []})
+            elements.append({"tag": "column_set", "flex_mode": "none",
+                             "background_style": "grey",
+                             "columns": cols})
+
+    # ---- AI 解读（自由文本，markdown 即可） ----
     if ai_text:
-        lines += ["", "---", "## AI 解读", "", ai_text.strip()]
+        elements.append({"tag": "markdown",
+                         "content": f"**AI 解读**\n{ai_text.strip()}"})
 
+    # ---- 底部：报告链接 + 免责 ----
     if page_url:
-        lines += ["", f"📄 完整网页报告：{page_url}"]
+        elements.append({"tag": "markdown", "content": f"📄 完整网页报告：{page_url}"})
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+                    "content": "数据来自东方财富公开接口，仅供研究参考，不构成投资建议。"}]})
+    return elements
 
-    lines += ["", "_仅供自用研究参考，不构成投资建议。_"]
-    return "\n".join(lines)
 
-
-def send_webhook(webhook: str, text: str) -> int:
+def send_webhook(webhook: str, elements: list) -> int:
     """POST 到飞书机器人 webhook。成功返回 0，失败返回非 0。"""
     payload = {
         "msg_type": "interactive",
@@ -116,11 +189,7 @@ def send_webhook(webhook: str, text: str) -> int:
                 "title": {"tag": "plain_text", "content": "A股多因子选股 · 每日推送"},
                 "template": "blue",
             },
-            "elements": [
-                {"tag": "markdown", "content": text},
-                {"tag": "note", "elements": [{"tag": "plain_text",
-                                              "content": "数据来自东方财富公开接口，仅供研究参考，不构成投资建议。"}]},
-            ],
+            "elements": elements,
         },
     }
     r = requests.post(webhook, json=payload, timeout=30)
@@ -155,8 +224,8 @@ def push_latest(cfg: Config) -> int:
     page_url = os.environ.get("PAGE_URL", "").strip()
     n = int(os.environ.get("FEISHU_TOP", "20"))
 
-    text = build_text(top, meta, data.get("backtest", {}), deep, ai_text, page_url, n)
-    return send_webhook(webhook, text)
+    elements = build_card(top, meta, data.get("backtest", {}), deep, ai_text, page_url, n)
+    return send_webhook(webhook, elements)
 
 
 def run_cli(cfg: Config) -> None:
