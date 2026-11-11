@@ -120,10 +120,8 @@ def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
     deep_map = {str(d.get("code")): d for d in deep if d} if deep else {}
     table_rows = []
     for t in top[:n]:
-        table_rows.append({
-            "template": "blue",
-            "cells": [_cell(_fmt_stock(t, k)) for k in _STOCK_KEYS],
-        })
+        # 飞书 table 的 rows 必须是数组的数组：每行 = 单元格数组，不是 {cells:[...]} 对象
+        table_rows.append([_cell(_fmt_stock(t, k)) for k in _STOCK_KEYS])
     elements.append({
         "tag": "table",
         "page_style": {"size": "lg", "page_split_mode": "default"},
