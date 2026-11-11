@@ -1,0 +1,55 @@
+name: daily-a-share-quant
+
+on:
+  schedule:
+    # 每个交易日早上 09:35（北京时间 = UTC 01:35）运行
+    # 注意：09:15 集合竞价刚开盘，快照接口的“最新价”字段可能仍为空导致清洗后 0 只，
+    #       推迟到 09:35 连续竞价数据稳定后再跑。cron 周一至周五(1-5)，节假日因“无数据”自然跳过
+    - cron: '35 1 * * 1-5'
+  workflow_dispatch: {}   # 允许在 Actions 页手动点击运行
+
+permissions:
+  contents: write   # 推送报告/历史数据到仓库
+
+concurrency:
+  group: a-share-quant
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install .
+
+      - name: 运行选股（自动生成报告 + 归档历史快照）
+        env:
+          TOPN: '30'            # 输出 Top 30
+          MIN_AMOUNT: '50000000' # 成交额下限 5000 万
+          DEEP_TOP: '30'        # 对综合分前 30 名做深度校验
+          # —— 可选：AI 解读。AI_API_KEY 请放在 仓库 Settings→Secrets→Actions，
+          #    名称为 AI_API_KEY；留空则跳过 AI 步骤（不报错）。
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+        run: python -m ashare_quant run
+
+      - name: 提交并推送报告与历史数据
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/ data/history/ docs/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "今天没有变化（可能是休市或数据未更新），跳过提交"
+            exit 0
+          fi
+          git commit -m "每日选股报告 $(date -u +%F)"
+          git push
