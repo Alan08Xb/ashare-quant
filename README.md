@@ -57,6 +57,7 @@ python -m ashare_quant top       # 只看今日 Top 表
 python -m ashare_quant history   # 已积累多少天快照
 python -m ashare_quant backtest  # 只看自我检验
 python -m ashare_quant ai        # 用已有 latest.json 重新生成 AI 解读(需配 key)
+python -m ashare_quant feishu    # 把最新结果推送到飞书机器人(需配 FEISHU_WEBHOOK)
 python -m ashare_quant nav 600519 # 单股近一年净值
 ```
 
@@ -94,6 +95,19 @@ git push -u origin main
 - **Variables** → 可选：`AI_BASE_URL`（默认 `https://api.openai.com/v1`）、`AI_MODEL`（默认 `gpt-4o-mini`）
 
 不配这些也没关系，工具会跳过 AI 步骤，其余全部照常。
+
+### 可选：每日推送到飞书
+
+在任意飞书群里加一个**自定义机器人**，把它的 Webhook 地址放进 GitHub Actions：
+
+- 飞书里建群 → 群设置 → **群机器人 → 添加机器人 → 自定义机器人** → 复制 Webhook
+- GitHub **Settings → Secrets and variables → Actions**：
+  - **Secrets** → 新建 `FEISHU_WEBHOOK` = 你复制的 Webhook 地址
+  - **Variables** → 可选 `PAGE_URL` = 你的 GitHub Pages 报告网址（如 `https://用户名.github.io/ashare-quant/`），消息里会附上完整报告链接
+- 之后每次跑完选股，会自动往群里推一张卡片（Top 20 表格 + 深度校验买点 + AI 解读，若已配置）
+
+本地想手动发：`export FEISHU_WEBHOOK='你的webhook'` 后 `python -m ashare_quant feishu`。
+不配 `FEISHU_WEBHOOK` 则完全跳过推送，不影响选股与网页报告。
 
 ---
 
@@ -168,6 +182,7 @@ ashare-quant/
 │  ├─ factors.py   # 因子计算（缩尾/标准化/市值中性）
 │  ├─ deep.py      # 深度校验（基本面/技术面/雷区）★
 │  ├─ ai.py        # 可选 AI 解读（OpenAI 兼容）★
+│  ├─ feishu.py    # 可选 飞书机器人推送 ★
 │  ├─ history.py   # 每日快照归档
 │  ├─ backtest.py  # 自我检验（IC/分位）
 │  ├─ report.py    # Markdown + HTML

@@ -23,6 +23,7 @@ from .backtest import run_backtest
 from .config import Config
 from .deep import deep_check
 from .factors import annualized_vol, compute_factors
+from .feishu import push_latest
 from .fetch import fetch_kline, fetch_pool_closes, fetch_snapshot
 from .history import list_available_days, save_snapshot
 from .report import write_reports
@@ -180,6 +181,7 @@ def main() -> None:
     sub.add_parser("history", help="列出历史天数")
     sub.add_parser("backtest", help="只跑自我检验")
     sub.add_parser("ai", help="对已有 latest.json 重新生成 AI 解读")
+    sub.add_parser("feishu", help="把已有 latest.json 结果推送到飞书机器人")
     sp = sub.add_parser("nav", help="单股近一年净值")
     sp.add_argument("code")
     args = p.parse_args()
@@ -191,6 +193,8 @@ def main() -> None:
         _run(print_top_only=True)
     elif args.cmd == "ai":
         _ai_rerun(cfg)
+    elif args.cmd == "feishu":
+        sys.exit(push_latest(cfg))
     elif args.cmd == "history":
         days = list_available_days(cfg)
         print(f"已积累 {len(days)} 个交易日的快照：{', '.join(days[-10:]) if days else '无'}")

@@ -42,6 +42,17 @@ jobs:
           AI_MODEL: ${{ vars.AI_MODEL }}
         run: python -m ashare_quant run
 
+      - name: 推送到飞书（可选）
+        if: always() && env.FEISHU_WEBHOOK != ''
+        env:
+          # —— 飞书推送。FEISHU_WEBHOOK 放在 仓库 Settings→Secrets→Actions（名称为 FEISHU_WEBHOOK）。
+          #    不配则跳过本步（不影响报告生成与推送）。
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          # 可选：你的 GitHub Pages 报告地址，例如 https://用户名.github.io/ashare-quant/
+          #    放 Variables（名称为 PAGE_URL），给消息里附上完整报告链接。
+          PAGE_URL: ${{ vars.PAGE_URL }}
+        run: python -m ashare_quant feishu
+
       - name: 提交并推送报告与历史数据
         run: |
           git config user.name "github-actions[bot]"
