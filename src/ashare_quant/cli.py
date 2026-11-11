@@ -49,6 +49,12 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     print(f"[2/6] 清洗股票池（原始 {len(snap)} 只）...")
     uni = clean_universe(snap, cfg)
     print(f"      {industry_stats(uni)}")
+    if uni.empty:
+        # 盘前/休市/接口异常都会导致清洗后 0 只：若静默继续，会把空结果提交成报告，
+        # 覆盖昨天的好数据。直接报错退出，让 CI 失败，避免污染历史。
+        print("!! 清洗后股票池为 0 只。可能原因：当前在北京时间 09:30 开盘前/已休市 "
+              "(实时价或成交额字段为空)，或数据接口异常。请开盘后再跑。", file=sys.stderr)
+        sys.exit(2)
 
     print("[2.5/6] 抓历史收盘价算 60 日真实波动率（低波动因子）...")
     beg = (dt.date.today() - dt.timedelta(days=200)).strftime("%Y%m%d")
