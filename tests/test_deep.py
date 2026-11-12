@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from ashare_quant.config import Config
 from ashare_quant.deep import _badges, chip_distribution, technical
@@ -38,6 +39,19 @@ def test_chip_profit_in_uptrend():
     assert c["profit"] > 0.5          # 上涨趋势末端，大部分筹码在下方获利
     assert c["cost_line"] > 0
     assert c["peak_state"] in ("单峰", "双峰", "多峰", "发散")
+
+
+def test_chip_main_cost_uses_only_last_30_days():
+    """30 日主力成本均线只受最近 30 根 K 线影响：篡改更早的价格/换手不应改变它。"""
+    k = _kline(uptrend=True)
+    base = chip_distribution(k)
+    cut = len(k) - 30
+    k2 = k.copy()
+    k2.loc[:cut - 1, "close"] *= 5          # 老 K 线价格失真
+    k2.loc[:cut - 1, "turnover"] = 0.01     # 老 K 线换手失真
+    alt = chip_distribution(k2)
+    assert base["main_cost"] == pytest.approx(alt["main_cost"])
+    assert base["cost_line"] != pytest.approx(alt["cost_line"])
 
 
 def test_badges_flags_risk_and_recommendation():

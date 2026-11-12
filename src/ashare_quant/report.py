@@ -94,9 +94,10 @@ def render_markdown(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.Data
     lines += ["", "### 深度校验（基本面 / 技术面 / 雷区）", "",
               "> 建议标签是规则化归类，不是荐股；雷区类需自行再核对数据。", ""]
     if deep is not None and not deep.empty:
-        dcols = [c for c in ["code", "name", "buy", "stop", "chip_adj", "rec", "badges"] if c in deep.columns]
+        dcols = [c for c in ["code", "name", "buy", "stop", "ma20", "main_cost", "chip_adj", "rec", "badges"] if c in deep.columns]
         if dcols:
             dhead = {"code": "代码", "name": "名称", "buy": "建议买入", "stop": "止损参考",
+                     "ma20": "20日线", "main_cost": "30日主力成本",
                      "chip_adj": "筹码调整", "rec": "规则建议", "badges": "信号徽章"}
             lines.append("| " + " | ".join(dhead[c] for c in dcols) + " |")
             lines.append("|" + "---|" * len(dcols))
@@ -151,9 +152,10 @@ def render_html(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.DataFram
     # 深度校验卡片
     deep_html = ""
     if deep is not None and not deep.empty:
-        dcols = [c for c in ["code", "name", "buy", "stop", "chip_adj", "rec", "badges"] if c in deep.columns]
+        dcols = [c for c in ["code", "name", "buy", "stop", "ma20", "main_cost", "chip_adj", "rec", "badges"] if c in deep.columns]
         if dcols:
             dheads = {"code": "代码", "name": "名称", "buy": "建议买入", "stop": "止损参考",
+                      "ma20": "20日线", "main_cost": "30日主力成本",
                       "chip_adj": "筹码调整", "rec": "规则建议", "badges": "信号徽章"}
             dthead = "".join(f"<th>{dheads.get(c, c)}</th>" for c in dcols)
             dtrs = []

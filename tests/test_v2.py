@@ -88,6 +88,25 @@ def test_fund_holding_hold_no_new(monkeypatch):
     assert out["bonus"] == cfg.fund_bonus_hold
 
 
+def test_feishu_card_has_ma20_and_main_cost_columns():
+    from ashare_quant.feishu import _DEEP_KEYS, build_card
+
+    top = [{"rank": 1, "code": "600519", "name": "贵州茅台", "industry": "白酒",
+            "price": 1500.0, "pct": 1.23, "ret_60": 5.0, "roe": 30.0}]
+    deep = [{"code": "600519", "name": "贵州茅台", "buy": 1480.0, "stop": 1406.0,
+             "ma20": 1495.5, "main_cost": 1470.25, "chip_adj": 0.31999999,
+             "rec": "优选·可分批观察", "badges": "多头排列 | 回踩20日线"}]
+    tables = [e for e in build_card(top, {"universe": "全市场"}, {}, deep)
+              if e.get("tag") == "table"]
+    deep_tbl = tables[-1]
+    assert [c["name"] for c in deep_tbl["columns"]] == _DEEP_KEYS
+    assert "ma20" in _DEEP_KEYS and "main_cost" in _DEEP_KEYS
+    row = deep_tbl["rows"][0]
+    assert row["ma20"] == "1495.50" and row["main_cost"] == "1470.25"
+    assert row["chip_adj"] == "+0.32"
+    assert row["buy"] == "1480.00" and row["stop"] == "1406.00"
+
+
 def _sample_with_industry(industries, per=40) -> pd.DataFrame:
     rng = np.random.default_rng(3)
     n = len(industries) * per

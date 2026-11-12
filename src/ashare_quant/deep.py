@@ -97,21 +97,21 @@ def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
     cost_line = float((close * w).sum())             # 平均成本（筹码加权均价）
     dev_cost = last / cost_line - 1 if cost_line > 0 else np.nan
 
-    # 60 日筹码成本均线：仅用最近 60 根 K 线重算，作为"主力近期建仓成本"近似
-    k60 = k.tail(60).copy()
-    c60 = k60["close"].values
-    t60 = np.nan_to_num(k60["turnover"].values, nan=0.0).clip(0, 3) / 100.0
-    m = len(k60)
-    w60 = np.zeros(m)
+    # 30 日筹码成本均线：仅用最近 30 根 K 线重算，作为"主力近期建仓成本"近似
+    k30 = k.tail(30).copy()
+    c30 = k30["close"].values
+    t30 = np.nan_to_num(k30["turnover"].values, nan=0.0).clip(0, 3) / 100.0
+    m = len(k30)
+    w30 = np.zeros(m)
     for i in range(m):
-        f = t60[i]
+        f = t30[i]
         surv = 1.0
         for j in range(i + 1, m):
-            surv *= max(1.0 - t60[j], 0.0)
-        w60[i] = f * surv
-    if w60.sum() > 1e-9:
-        w60 = w60 / w60.sum()
-        main_cost = float((c60 * w60).sum())
+            surv *= max(1.0 - t30[j], 0.0)
+        w30[i] = f * surv
+    if w30.sum() > 1e-9:
+        w30 = w30 / w30.sum()
+        main_cost = float((c30 * w30).sum())
     else:
         main_cost = float(np.nan)
 
@@ -142,7 +142,7 @@ def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
         "ok": True,
         "profit": profit,
         "cost_line": cost_line,
-        "main_cost": main_cost,          # 60 日主力筹码成本均线
+        "main_cost": main_cost,          # 30 日主力筹码成本均线
         "close_vs_cost": dev_cost,
         "peak_state": peak_state,
         "chip_lo": lo9,
@@ -279,12 +279,12 @@ def fund_holding(code: str, cfg: Config) -> dict:
 
 
 def buy_zone(k: pd.DataFrame, chip: dict) -> dict:
-    """建议买入价 / 止损价：以 20 日线与 60 日筹码成本均线的较高者为支撑参考。
+    """建议买入价 / 止损价：以 20 日线与 30 日主力筹码成本均线的较高者为支撑参考。
 
     参考列：
-      - ma20      20 日均线
+      - ma20       20 日均线
       - cost_line  筹码成本均线（全窗口加权）
-      - main_cost  主力筹码成本均线（近 60 日加权）
+      - main_cost  主力筹码成本均线（近 30 日加权）
     建议买入 = max(ma20, main_cost)；现价跌破 20 日线时以 20 日线为买点（等站上）。
     """
     if k.empty or len(k) < 25:
@@ -293,7 +293,7 @@ def buy_zone(k: pd.DataFrame, chip: dict) -> dict:
     ma20 = close.rolling(20).mean().iloc[-1]
     cost = chip.get("cost_line") if chip and chip.get("ok") else np.nan
     main_cost = chip.get("main_cost") if chip and chip.get("ok") else np.nan
-    # 支撑参考：20 日线 与 主力(60日)筹码成本均线的较高者
+    # 支撑参考：20 日线 与 主力(30日)筹码成本均线的较高者
     refs = [v for v in (ma20, main_cost) if pd.notna(v) and v > 0]
     support = max(refs) if refs else (float(ma20) if pd.notna(ma20) else float("nan"))
     last = close.iloc[-1]

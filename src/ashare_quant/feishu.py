@@ -46,17 +46,19 @@ _SEL_KEYS = ["rank", "code", "name", "industry", "price", "pct", "ret_60", "roe"
              "np_yoy", "gross_margin", "pe", "pb", "floatcap", "turnover", "score"]
 
 # ---- 深度校验表 ----
-# 代码 | 名称 | 建议买入 | 止损参考 | 筹码调整 | 规则建议 | 信号徽章
+# 代码 | 名称 | 建议买入 | 止损参考 | 20日线 | 30日主力成本 | 筹码调整 | 规则建议 | 信号徽章
 _DEEP_COLUMNS = [
     {"name": "code", "display_name": "代码", "width": "auto", "data_type": "text"},
     {"name": "name", "display_name": "名称", "width": "auto", "data_type": "text"},
     {"name": "buy", "display_name": "建议买入", "width": "auto", "data_type": "text"},
     {"name": "stop", "display_name": "止损参考", "width": "auto", "data_type": "text"},
+    {"name": "ma20", "display_name": "20日线", "width": "auto", "data_type": "text"},
+    {"name": "main_cost", "display_name": "30日主力成本", "width": "auto", "data_type": "text"},
     {"name": "chip_adj", "display_name": "筹码调整", "width": "auto", "data_type": "text"},
     {"name": "rec", "display_name": "规则建议", "width": "auto", "data_type": "text"},
     {"name": "badges", "display_name": "信号徽章", "width": "auto", "data_type": "text"},
 ]
-_DEEP_KEYS = ["code", "name", "buy", "stop", "chip_adj", "rec", "badges"]
+_DEEP_KEYS = ["code", "name", "buy", "stop", "ma20", "main_cost", "chip_adj", "rec", "badges"]
 
 
 def _num(v, fmt="{:.1f}"):
@@ -126,6 +128,8 @@ def _fmt_deep(d: dict) -> dict:
         "name": str(d.get("name", "")),
         "buy": _num(d.get("buy"), "{:.2f}"),
         "stop": _num(d.get("stop"), "{:.2f}"),
+        "ma20": _num(d.get("ma20"), "{:.2f}"),
+        "main_cost": _num(d.get("main_cost"), "{:.2f}"),
         "chip_adj": _num(d.get("chip_adj"), "{:+.2f}"),
         "rec": str(d.get("rec", "")),
         "badges": _badges_short(str(d.get("badges", ""))),
