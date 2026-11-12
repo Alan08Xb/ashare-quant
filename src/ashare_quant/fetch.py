@@ -10,6 +10,8 @@ import requests
 
 # 全市场快照（clist）：一次调用可拉全市场所有字段
 CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+# 镜像（延迟行情）：主站突发 502 时的回退，盘后收市价一致
+CLIST_URL_ALT = "https://push2delay.eastmoney.com/api/qt/clist/get"
 # 个股历史 K 线（push2his）：供“组合历史净值”参考用
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 # 个股财务指标（datacenter，F10）
@@ -46,16 +48,34 @@ FIELD_MAP = {
 }
 
 
-def _get_json(url: str, params: dict, retries: int = 3) -> dict[str, Any]:
-    for i in range(retries):
-        try:
-            r = requests.get(url, params=params, headers={"User-Agent": UA}, timeout=20)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
+def _get_json(url: str, params: dict, retries: int = 7,
+              alt_url: str | None = None) -> dict[str, Any]:
+    """带退避重试的 GET。东财 push2 在连续翻页时经常返回瞬时 502/429，
+    必须对 5xx/429 用更长的指数退避才撑得过去；主站反复失败时回退到镜像 alt_url。"""
+    last: Exception | None = None
+    candidates = [url] + ([alt_url] if alt_url and alt_url != url else [])
+    for base in candidates:
+        for i in range(retries):
+            try:
+                r = requests.get(base, params=params,
+                                 headers={"User-Agent": UA}, timeout=25)
+                r.raise_for_status()
+                return r.json()
+            except requests.exceptions.HTTPError as e:
+                last = e
+                # 5xx / 429 = 服务端瞬时故障，退避更长；其它 4xx 别狂试
+                if e.response is not None and 500 <= e.response.status_code <= 599:
+                    wait = min(2.0 ** (i + 1), 15.0)   # 2,4,8,15,15...
+                else:
+                    wait = 1.0
+            except requests.exceptions.RequestException as e:
+                last = e
+                wait = 1.5 * (i + 1)
             if i == retries - 1:
-                raise
-            time.sleep(1.5 * (i + 1))
+                break
+            time.sleep(wait)
+    if last is not None:
+        raise last
     raise RuntimeError("unreachable")
 
 
@@ -70,7 +90,7 @@ def fetch_snapshot(fs: str, fields: list[str]) -> pd.DataFrame:
         data = _get_json(CLIST_URL, {
             "pn": page, "pz": per_page, "po": 1, "np": 1, "fltt": 2, "invt": 2,
             "fid": "f3", "fs": fs, "fields": fld,
-        }).get("data")
+        }, alt_url=CLIST_URL_ALT).get("data")
         if not data:
             break
         total = data.get("total", total)
@@ -81,7 +101,7 @@ def fetch_snapshot(fs: str, fields: list[str]) -> pd.DataFrame:
         if total is not None and len(rows) >= total:
             break
         page += 1
-        time.sleep(0.15)
+        time.sleep(0.5)   # 东财对高频翻页会 502，页间隔拉长到 0.5s
     df = pd.DataFrame(rows)
     df = df.rename(columns={k: v for k, v in FIELD_MAP.items() if k in df.columns})
     return df
