@@ -12,10 +12,11 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
-# 选股结果/报告/历史数据（隐私，不提交到公开仓库）
+# 选股结果/历史数据（隐私，不提交到公开仓库）
 reports/
-docs/
 data/history/
+# 注意：docs/ 是 GitHub Pages 公开网页，必须提交；reports/、data/history/ 保密
+# 不要再把 docs/ 加回这里，否则 Pages 构建会报 No such file or directory /docs
 
 # 本地调试/临时文件
 holders_tmp.json

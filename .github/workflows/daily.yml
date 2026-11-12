@@ -43,18 +43,20 @@ jobs:
           AI_MODEL: ${{ vars.AI_MODEL }}
         run: python -m ashare_quant run
 
-      # 结果默认不推送到公开仓库（隐私）。若要开 GitHub Pages 网页报告，
-      # 把下面注释的"提交并推送报告"步骤恢复即可。
-      # - name: 提交并推送报告与历史数据
-      #   run: |
-      #     git config user.name "github-actions[bot]"
-      #     git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      #     git add reports/ data/history/ docs/ 2>/dev/null || true
-      #     if git diff --cached --quiet; then
-      #       echo "今天没有变化，跳过提交"; exit 0
-      #     fi
-      #     git commit -m "每日选股报告 $(date -u +%F)"
-      #     git push
+      # 只提交 docs/（GitHub Pages 公开网页报告）。
+      # reports/ 与 data/history/ 是隐私，永不提交。仅当选股成功才提交，
+      # 休市/无数据时 run 退出、本步不执行，不会用空报告覆盖上一份。
+      - name: 提交并推送网页报告
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "今天没有变化，跳过提交"; exit 0
+          fi
+          git commit -m "每日选股网页报告 $(date -u +%F)"
+          git push
 
       # 仅当选股成功才推送到飞书（休市/无数据时 run 退出，本步不执行）
       - name: 推送到飞书（可选）
