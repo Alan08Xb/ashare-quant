@@ -24,7 +24,7 @@ from .config import Config
 from .deep import deep_check
 from .factors import annualized_vol, compute_factors
 from .feishu import push_latest
-from .fetch import fetch_kline, fetch_pool_closes, fetch_snapshot
+from .fetch import fetch_kline, fetch_market_snapshot, fetch_pool_closes
 from .history import list_available_days, save_snapshot
 from .report import write_reports
 from .universe import clean_universe, industry_stats
@@ -34,7 +34,7 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     cfg = Config()
     day = dt.date.today().strftime("%Y%m%d")
     print(f"[1/6] 抓取全市场快照（{dt.datetime.now().strftime('%H:%M:%S')}）...")
-    snap = fetch_snapshot(cfg.market_fs(), cfg.snapshot_fields())
+    snap = fetch_market_snapshot(cfg.market_fs(), cfg.snapshot_fields())
     if snap.empty:
         print("!! 未取到数据，可能非交易日或接口异常。", file=sys.stderr)
         sys.exit(2)
@@ -77,8 +77,15 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     save_snapshot(scored, cfg, day)
 
     print(f"[4.5/6] 深度校验 Top {cfg.deep_top}（基本面/技术面/雷区/大基金）...")
-    deep = deep_check(cand.head(cfg.deep_top), cfg)
-    print(f"      深度校验完成（{len(deep)} 只）")
+    try:
+        deep = deep_check(cand.head(cfg.deep_top), cfg)
+        print(f"      深度校验完成（{len(deep)} 只）")
+    except Exception as e:
+        # 东财 K线/F10 被机房 IP 限流时深度校验可能整体失败：降级为只有 Top 榜单，
+        # 避免整日 run 崩掉。宁可出榜单，不强求深检。
+        print(f"      !! 深度校验失败（{type(e).__name__}: {e}），本日仅输出 Top 榜单"
+              f"（无深度信号）。", file=sys.stderr)
+        deep = pd.DataFrame()
 
     # 深度加成：基金新增 + 筹码位置（追高/机会），合入综合分，重新排名后再取 Top N
     if not deep.empty:

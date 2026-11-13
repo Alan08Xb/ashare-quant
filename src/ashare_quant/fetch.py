@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import random
+import sys
 import time
 from typing import Any
 
 import pandas as pd
+import numpy as np
 import requests
 
 # 全市场快照（clist）：一次调用可拉全市场所有字段
 CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 # 镜像（延迟行情）：主站突发 502 时的回退，盘后收市价一致
 CLIST_URL_ALT = "https://push2delay.eastmoney.com/api/qt/clist/get"
+# 新浪全市场行情备用源：东财常屏蔽 GitHub Actions 机房 IP，此时换新浪（不挑机房 IP）
+SINA_URL = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodeData")
 # 个股历史 K 线（push2his）：供“组合历史净值”参考用
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 # 个股财务指标（datacenter，F10）
@@ -110,6 +115,73 @@ def fetch_snapshot(fs: str, fields: list[str]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df = df.rename(columns={k: v for k, v in FIELD_MAP.items() if k in df.columns})
     return df
+
+
+# 东财有、新浪缺失的字段（置 NaN 占位，相关因子自动归 0）
+_SINA_MISSING = ["vol_ratio", "ret_60", "ret_ytd", "ipo_date", "roe", "revenue",
+                 "net_profit", "np_yoy", "gross_margin", "total_assets", "industry"]
+
+
+def fetch_snapshot_sina() -> pd.DataFrame:
+    """新浪全市场快照（备用源，不挑机房 IP）。列名与东财对齐，缺失字段置 NaN。
+
+    东财 push2 常对 GitHub Actions 的云端 IP 限流返回 502，此时快照换新浪。
+    新浪缺质量/动量/行业类字段（ROE/净利/行业/60日涨幅等），打分时对应因子归 0。
+    """
+    rows: list[dict] = []
+    page, num = 1, 100
+    while True:
+        data = _get_json(SINA_URL, {"page": page, "num": num, "sort": "symbol",
+                                    "asc": 1, "node": "hs_a"}, retries=3)
+        if not data:
+            break
+        rows.extend(data)
+        if len(data) < num:
+            break
+        page += 1
+        time.sleep(0.3)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df = df[~df["symbol"].astype(str).str.startswith("bj")]   # 滤掉北交所
+    out = pd.DataFrame({
+        "code": df["code"].astype(str).str.zfill(6),
+        "name": df["name"].astype(str),
+        "price": pd.to_numeric(df["trade"], errors="coerce"),
+        "pct": pd.to_numeric(df["changepercent"], errors="coerce"),
+        "amount": pd.to_numeric(df["amount"], errors="coerce"),
+        "prev_close": pd.to_numeric(df["settlement"], errors="coerce"),
+        "pe": pd.to_numeric(df["per"], errors="coerce"),
+        "pb": pd.to_numeric(df["pb"], errors="coerce"),
+        "mktcap": pd.to_numeric(df["mktcap"], errors="coerce") * 1e4,
+        "floatcap": pd.to_numeric(df["nmc"], errors="coerce") * 1e4,
+        "turnover": pd.to_numeric(df["turnoverratio"], errors="coerce"),
+    })
+    hi = pd.to_numeric(df["high"], errors="coerce")
+    lo = pd.to_numeric(df["low"], errors="coerce")
+    prev = pd.to_numeric(df["settlement"], errors="coerce")
+    out["amplitude"] = ((hi - lo) / prev * 100.0).replace([np.inf, -np.inf], np.nan)
+    for c in _SINA_MISSING:
+        out[c] = np.nan
+    return out
+
+
+def fetch_market_snapshot(fs: str, fields: list[str]) -> pd.DataFrame:
+    """全市场快照：优先东财，失败自动回退新浪。
+
+    东财对 GitHub Actions 机房 IP 常持续 502（重试无用），此时用新浪兜底，
+    保证每天至少能出榜单，而不是整日失败。
+    """
+    try:
+        return fetch_snapshot(fs, fields)
+    except Exception as e:
+        print(f"  东财快照失败（{type(e).__name__}: {e}），回退新浪源…", file=sys.stderr)
+        snap = fetch_snapshot_sina()
+        if snap.empty:
+            raise RuntimeError("东财与新浪快照均失败") from e
+        print(f"  已用新浪快照（{len(snap)} 只；缺质量/动量/行业字段→相关因子归 0）",
+              file=sys.stderr)
+        return snap
 
 
 def fetch_kline(code: str, beg: str, end: str, market: str = None) -> pd.DataFrame:

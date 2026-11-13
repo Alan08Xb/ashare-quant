@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 
 import numpy as np
 import pandas as pd
@@ -411,45 +412,50 @@ def deep_check(candidates: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     rows = []
     for _, s in candidates.iterrows():
         code = str(s["code"]).zfill(6)
-        k = fetch_kline(code, (dt.date.today() - dt.timedelta(days=400)).strftime("%Y%m%d"),
-                        dt.date.today().strftime("%Y%m%d"))
-        tech = technical(k)
-        chip = chip_distribution(k)
-        fund = fundamental(code, cfg)
-        pl = pledge_ratio(code) if fund.get("ok") else None
-        fh = fund_holding(code, cfg)
-        bz = buy_zone(k, chip)
-        d = dict(tech)
-        d["tech_ok"] = d.pop("ok", False)
-        if chip.get("ok"):
-            for kk, vv in chip.items():
-                if kk != "ok":
-                    d[kk] = vv              # profit, cost_line, close_vs_cost, peak_state, chip_lo, chip_hi
-        d["chip_ok"] = chip.get("ok", False)
-        if fund.get("ok"):
-            for kk, vv in fund.items():
-                if kk != "ok":
-                    d[kk] = vv              # roe_n, roe_years, cash_ratio, gross_margin, debt, np_yoy, goodwill_ratio, ...
-        d["fund_ok"] = fund.get("ok", False)
-        d["pledge"] = pl
-        d["fund_bonus"] = fh.get("bonus", 0.0)
-        d["fund_state"] = "新增" if fh.get("new") else ("持有" if fh.get("hold") else "无")
-        d["buy"], d["stop"] = bz.get("buy"), bz.get("stop")
-        d["ma20"] = bz.get("ma20")
-        d["cost_line"] = bz.get("cost_line")
-        d["main_cost"] = bz.get("main_cost")
-        d["code"], d["name"] = code, s.get("name")
-        d["chip_adj"] = chip_adjust(d, cfg)
-        badges, rec = _badges(d, cfg)
-        if fh.get("new"):
-            badges.insert(0, "大基金新增✓")
-        elif fh.get("hold"):
-            badges.insert(0, "大基金持有")
-        if d["chip_adj"] >= 0.4:
-            badges.append("贴近成本·主力浮盈小✓")
-        elif d["chip_adj"] <= -0.4:
-            badges.append("追高·接盘风险⚠")
-        d["badges"] = " | ".join(badges) if badges else "数据不足"
-        d["rec"] = rec
-        rows.append(d)
+        try:
+            k = fetch_kline(code, (dt.date.today() - dt.timedelta(days=400)).strftime("%Y%m%d"),
+                            dt.date.today().strftime("%Y%m%d"))
+            tech = technical(k)
+            chip = chip_distribution(k)
+            fund = fundamental(code, cfg)
+            pl = pledge_ratio(code) if fund.get("ok") else None
+            fh = fund_holding(code, cfg)
+            bz = buy_zone(k, chip)
+            d = dict(tech)
+            d["tech_ok"] = d.pop("ok", False)
+            if chip.get("ok"):
+                for kk, vv in chip.items():
+                    if kk != "ok":
+                        d[kk] = vv              # profit, cost_line, close_vs_cost, peak_state, chip_lo, chip_hi
+            d["chip_ok"] = chip.get("ok", False)
+            if fund.get("ok"):
+                for kk, vv in fund.items():
+                    if kk != "ok":
+                        d[kk] = vv              # roe_n, roe_years, cash_ratio, gross_margin, debt, np_yoy, goodwill_ratio, ...
+            d["fund_ok"] = fund.get("ok", False)
+            d["pledge"] = pl
+            d["fund_bonus"] = fh.get("bonus", 0.0)
+            d["fund_state"] = "新增" if fh.get("new") else ("持有" if fh.get("hold") else "无")
+            d["buy"], d["stop"] = bz.get("buy"), bz.get("stop")
+            d["ma20"] = bz.get("ma20")
+            d["cost_line"] = bz.get("cost_line")
+            d["main_cost"] = bz.get("main_cost")
+            d["code"], d["name"] = code, s.get("name")
+            d["chip_adj"] = chip_adjust(d, cfg)
+            badges, rec = _badges(d, cfg)
+            if fh.get("new"):
+                badges.insert(0, "大基金新增✓")
+            elif fh.get("hold"):
+                badges.insert(0, "大基金持有")
+            if d["chip_adj"] >= 0.4:
+                badges.append("贴近成本·主力浮盈小✓")
+            elif d["chip_adj"] <= -0.4:
+                badges.append("追高·接盘风险⚠")
+            d["badges"] = " | ".join(badges) if badges else "数据不足"
+            d["rec"] = rec
+            rows.append(d)
+        except Exception as e:
+            # 单只数据源（K线/F10）不可用时跳过该只，避免整段深检崩掉整个 run
+            print(f"      深检 {code} 失败（{type(e).__name__}: {e}），跳过", file=sys.stderr)
+            continue
     return pd.DataFrame(rows)

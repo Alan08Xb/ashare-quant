@@ -60,8 +60,10 @@ def _raw_quality(df: pd.DataFrame) -> pd.Series:
 
 
 def _raw_momentum(df: pd.DataFrame) -> pd.Series:
-    """动量因子：60 日涨跌幅（回看趋势，反向排除短期过热见 score）。"""
-    return zscore(winsorize(df["ret_60"].astype(float)))
+    """动量因子：60 日涨跌幅（回看趋势，反向排除短期过热见 score）。缺列/全空时归 0。"""
+    if "ret_60" not in df.columns or df["ret_60"].isna().all():
+        return pd.Series(0.0, index=df.index)
+    return zscore(winsorize(df["ret_60"].astype(float))).fillna(0.0)
 
 
 def _raw_lowvol(df: pd.DataFrame, vol_map: dict | None = None) -> pd.Series:
