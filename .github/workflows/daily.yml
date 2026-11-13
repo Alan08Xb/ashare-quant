@@ -41,7 +41,18 @@ jobs:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_BASE_URL: ${{ vars.AI_BASE_URL }}
           AI_MODEL: ${{ vars.AI_MODEL }}
-        run: python -m ashare_quant run
+        run: |
+          # 东财高峰会突发 502，抓全市场快照可能失败。这里整体重试：
+          # 失败后等 90 秒再跑（风暴通常一两分钟就过），最多 3 次。
+          for i in 1 2 3; do
+            echo "== 选股尝试 $i/3 =="
+            if python -m ashare_quant run; then
+              echo "选股成功"; exit 0
+            fi
+            echo "第 $i 次失败，90 秒后重试..."
+            sleep 90
+          done
+          echo "3 次都失败"; exit 1
 
       # 只提交 docs/（GitHub Pages 公开网页报告）。
       # reports/ 与 data/history/ 是隐私，永不提交。仅当选股成功才提交，

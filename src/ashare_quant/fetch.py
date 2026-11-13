@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
@@ -48,32 +49,36 @@ FIELD_MAP = {
 }
 
 
-def _get_json(url: str, params: dict, retries: int = 7,
+def _get_json(url: str, params: dict, retries: int = 4,
               alt_url: str | None = None) -> dict[str, Any]:
-    """带退避重试的 GET。东财 push2 在连续翻页时经常返回瞬时 502/429，
-    必须对 5xx/429 用更长的指数退避才撑得过去；主站反复失败时回退到镜像 alt_url。"""
+    """带退避重试的 GET。东财 push2 在高峰时段会突发 502/429（可持续几分钟）。
+
+    这里重试必须"快"：每次最多 ~10-20s 就放弃，交给外层整体重试
+    （workflow 自动重试 / NAS 定时补跑）。若单页长时间重试，整个任务会
+    卡几小时最后仍失败——比快速失败更糟。
+    """
     last: Exception | None = None
     candidates = [url] + ([alt_url] if alt_url and alt_url != url else [])
     for base in candidates:
         for i in range(retries):
             try:
                 r = requests.get(base, params=params,
-                                 headers={"User-Agent": UA}, timeout=25)
+                                 headers={"User-Agent": UA}, timeout=20)
                 r.raise_for_status()
                 return r.json()
             except requests.exceptions.HTTPError as e:
                 last = e
-                # 5xx / 429 = 服务端瞬时故障，退避更长；其它 4xx 别狂试
+                # 5xx/429 退避，封顶 6s；其它 4xx 稍等
                 if e.response is not None and 500 <= e.response.status_code <= 599:
-                    wait = min(2.0 ** (i + 1), 15.0)   # 2,4,8,15,15...
+                    wait = min(1.5 ** (i + 1), 6.0)
                 else:
                     wait = 1.0
             except requests.exceptions.RequestException as e:
                 last = e
-                wait = 1.5 * (i + 1)
+                wait = min(1.5 * (i + 1), 6.0)
             if i == retries - 1:
                 break
-            time.sleep(wait)
+            time.sleep(wait + random.uniform(0, 1.0))   # 加抖动，避免与东财限流同频撞击
     if last is not None:
         raise last
     raise RuntimeError("unreachable")
