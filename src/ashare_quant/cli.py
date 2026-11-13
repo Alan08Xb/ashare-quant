@@ -24,7 +24,7 @@ from .config import Config
 from .deep import deep_check
 from .factors import annualized_vol, compute_factors
 from .feishu import push_latest
-from .fetch import fetch_kline, fetch_market_snapshot, fetch_pool_closes
+from .fetch import fetch_kline, fetch_kline_close, fetch_market_snapshot, fetch_pool_closes
 from .history import list_available_days, save_snapshot
 from .report import write_reports
 from .universe import clean_universe, industry_stats
@@ -34,7 +34,7 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     cfg = Config()
     day = dt.date.today().strftime("%Y%m%d")
     print(f"[1/6] 抓取全市场快照（{dt.datetime.now().strftime('%H:%M:%S')}）...")
-    snap = fetch_market_snapshot(cfg.market_fs(), cfg.snapshot_fields())
+    snap, source = fetch_market_snapshot(cfg.market_fs(), cfg.snapshot_fields())
     if snap.empty:
         print("!! 未取到数据，可能非交易日或接口异常。", file=sys.stderr)
         sys.exit(2)
@@ -64,8 +64,52 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     vol_map = {c: annualized_vol(s, cfg.vol_days, cfg.vol_annualize) for c, s in closes.items()}
     print(f"      波动率覆盖 {len(vol_map)}/{len(uni)} 只")
 
-    print("[3/6] 计算因子并打分...")
-    scored = compute_factors(uni, cfg, vol_map)
+    if source == "sina":
+        # ===== 新浪快照降级路径：两段式筛选 =====
+        # 第一段：新浪只有估值/流动性字段（质量/成长/行业缺列自动归 0）→ 粗筛 top coarse_top
+        print(f"[3a/6] 粗筛（仅估值/流动性因子）→ top {cfg.coarse_top} ...")
+        first_pass = compute_factors(uni, cfg, vol_map)          # 全市场因子表（回测归档用）
+        coarse = first_pass.nlargest(cfg.coarse_top, "score").copy()
+
+        # 第二段：baostock 补齐粗筛池的质量/成长，K线补 60 日动量，再精筛出 top_n
+        print(f"[3b/6] baostock 补齐 {len(coarse)} 只基本面（质量/成长/动量）...")
+        fund = None
+        try:
+            from .baostock_src import enrich as bs_enrich
+            fund = bs_enrich([str(c).zfill(6) for c in coarse["code"]], fill_ret60=False)
+            fund.index = fund.index.astype(str)
+            for col in ("roe", "gross_margin", "np_yoy", "net_profit"):
+                if col in fund.columns:
+                    coarse[col] = coarse["code"].astype(str).map(fund[col])
+            # 动量：优先用已抓的 K 线收盘算 60 日涨幅（免额外请求）
+            def _ret60(c: str) -> float:
+                s = closes.get(str(c).zfill(6))
+                if s is None or len(s) < 2:
+                    return float("nan")
+                base = s.iloc[-61] if len(s) >= 61 else s.iloc[0]
+                return float((s.iloc[-1] / base - 1) * 100)
+            coarse["ret_60"] = coarse["code"].astype(str).map(_ret60)
+            # 次新复核：新浪无上市日，用 baostock 上市日回填后排除不足 N 天的
+            if "ipo_date" in fund.columns:
+                coarse["ipo_date"] = coarse["code"].astype(str).map(fund["ipo_date"])
+                ipo = pd.to_numeric(coarse["ipo_date"], errors="coerce")
+                days = int(dt.date.today().strftime("%Y%m%d")) - ipo
+                coarse = coarse[days.isna() | (days >= cfg.min_listing_days)]
+        except Exception as e:
+            print(f"      !! baostock 补齐失败（{type(e).__name__}: {e}），"
+                  f"退化为仅估值/流动性因子", file=sys.stderr)
+            fund = None
+        if fund is not None:
+            _cov = lambda c: f"{c} {int(fund[c].notna().sum())}/{len(fund)}" if c in fund.columns else f"{c} 缺列"
+            print(f"      baostock 补齐: {_cov('roe')} | {_cov('np_yoy')} | "
+                  f"ret_60 {int(coarse['ret_60'].notna().sum())}/{len(coarse)}")
+        print("[3c/6] 二次精筛（质量/成长/动量因子已生效）...")
+        scored = compute_factors(coarse, cfg, vol_map)
+    else:
+        print("[3/6] 计算因子并打分...")
+        first_pass = compute_factors(uni, cfg, vol_map)
+        scored = first_pass
+
     cand = scored.sort_values("rank").head(max(cfg.top_n, cfg.deep_top))
     top = cand.head(cfg.top_n)
 
@@ -74,7 +118,9 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
         return top
 
     print("[4/6] 归档当日快照（用于自我检验回测）...")
-    save_snapshot(scored, cfg, day)
+    # 归档"第一阶段"全市场因子表（非 baostock 二次精筛的 100 只小表），
+    # 保证回测分组口径稳定：每天都是全市场同一套一阶段因子
+    save_snapshot(first_pass, cfg, day)
 
     print(f"[4.5/6] 深度校验 Top {cfg.deep_top}（基本面/技术面/雷区/大基金）...")
     try:
@@ -107,6 +153,7 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     print("[5/6] 回测 + 生成报告...")
     bt = run_backtest(cfg)
     meta = {
+        "source": source,                 # 当日数据源：eastmoney=字段齐全 / sina=baostock 二次筛选补齐
         "universe": industry_stats(uni),
         "w_value": cfg.w_value, "w_quality": cfg.w_quality,
         "w_momentum": cfg.w_momentum, "w_lowvol": cfg.w_lowvol,

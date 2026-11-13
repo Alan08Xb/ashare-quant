@@ -33,6 +33,7 @@ class Config:
 
         # ---- 选股 ----
         self.top_n: int = _env("TOPN", 50)               # 输出前 N 名
+        self.coarse_top: int = _env("COARSE_TOP", 100)   # 降级路径粗筛目标：东财失败时先粗筛 N 只，再 baostock 补齐基本面后精筛出 top_n
         self.size_neutral: bool = _env("SIZE_NEUTRAL", True)  # 市值中性化：在市值分位内去均值，消除大小盘偏差
         self.size_buckets: int = _env("SIZE_BUCKETS", 5) # 市值分位数量
 

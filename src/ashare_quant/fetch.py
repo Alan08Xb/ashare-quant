@@ -166,22 +166,25 @@ def fetch_snapshot_sina() -> pd.DataFrame:
     return out
 
 
-def fetch_market_snapshot(fs: str, fields: list[str]) -> pd.DataFrame:
+def fetch_market_snapshot(fs: str, fields: list[str]) -> tuple[pd.DataFrame, str]:
     """全市场快照：优先东财，失败自动回退新浪。
 
     东财对 GitHub Actions 机房 IP 常持续 502（重试无用），此时用新浪兜底，
     保证每天至少能出榜单，而不是整日失败。
+
+    返回 (DataFrame, source)：source 为 "eastmoney"（字段齐全）或 "sina"
+    （缺质量/动量/行业字段，调用方应走 baostock 二次筛选路径补齐）。
     """
     try:
-        return fetch_snapshot(fs, fields)
+        return fetch_snapshot(fs, fields), "eastmoney"
     except Exception as e:
         print(f"  东财快照失败（{type(e).__name__}: {e}），回退新浪源…", file=sys.stderr)
         snap = fetch_snapshot_sina()
         if snap.empty:
             raise RuntimeError("东财与新浪快照均失败") from e
-        print(f"  已用新浪快照（{len(snap)} 只；缺质量/动量/行业字段→相关因子归 0）",
-              file=sys.stderr)
-        return snap
+        print(f"  已用新浪快照（{len(snap)} 只；缺质量/动量/行业字段，"
+              f"将 baostock 二次筛选补齐）", file=sys.stderr)
+        return snap, "sina"
 
 
 def fetch_kline(code: str, beg: str, end: str, market: str = None) -> pd.DataFrame:
