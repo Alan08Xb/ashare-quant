@@ -15,6 +15,7 @@ baostock（证券宝）是国内免费源，独立于东财/新浪服务器，�
 from __future__ import annotations
 
 import datetime as dt
+import sys
 
 import numpy as np
 import pandas as pd
@@ -140,15 +141,25 @@ def fetch_ret60(code: str) -> float:
         return float("nan")
 
 
-def enrich(codes: list[str], fill_ret60: bool = True) -> pd.DataFrame:
+def enrich(codes: list[str], fill_ret60: bool = True, deadline: float | None = 300.0) -> pd.DataFrame:
     """对一批股票批量补全基本面，返回 index=code 的 DataFrame。
 
     列：roe / gross_margin / np_yoy / net_profit / ipo_date（可缺），ret_60 可选（默认补）。
     任何股票失败则该行对应列为 NaN——绝不抛异常拖垮流程。
+
+    deadline: 整体耗时熔断（秒）。baostock 是 socket 长连接且逐只串行，
+    服务器慢时 100 只会磨几十分钟甚至 1 小时。超过 deadline 立即停止补齐，
+    用已拿到的部分数据返回，让 run 继续出榜，而不是整日卡死。
     """
+    import time
+    t0 = time.time()
     rows = {}
     for code in codes:
         code = str(code).zfill(6)
+        if deadline is not None and (time.time() - t0) > deadline:
+            print(f"[baostock] 已达到 {deadline:.0f}s 整体熔断，"
+                  f"用已补齐 {len(rows)}/{len(codes)} 只继续…", file=sys.stderr)
+            break
         r = fetch_quality(code)
         if not r:
             r = {}

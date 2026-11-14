@@ -21,3 +21,5 @@ data/history/
 # 本地调试/临时文件
 holders_tmp.json
 probe.py
+_run*.log
+_backup*/

@@ -57,10 +57,11 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
               "(实时价或成交额字段为空)，或数据接口异常。请开盘后再跑。", file=sys.stderr)
         sys.exit(2)
 
-    print("[2.5/6] 抓历史收盘价算 60 日真实波动率（低波动因子）...")
+    print("[2.5/6] 抓历史收盘价算 60 日真实波动率（低波动因子，可熔断）...")
     beg = (dt.date.today() - dt.timedelta(days=200)).strftime("%Y%m%d")
     end = dt.date.today().strftime("%Y%m%d")
-    closes = fetch_pool_closes(uni["code"].astype(str).tolist(), beg, end, cfg.vol_concurrency)
+    closes = fetch_pool_closes(uni["code"].astype(str).tolist(), beg, end,
+                               cfg.vol_concurrency, cfg.vol_kline_deadline)
     vol_map = {c: annualized_vol(s, cfg.vol_days, cfg.vol_annualize) for c, s in closes.items()}
     print(f"      波动率覆盖 {len(vol_map)}/{len(uni)} 只")
 
@@ -124,7 +125,7 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
 
     print(f"[4.5/6] 深度校验 Top {cfg.deep_top}（基本面/技术面/雷区/大基金）...")
     try:
-        deep = deep_check(cand.head(cfg.deep_top), cfg)
+        deep = deep_check(cand.head(cfg.deep_top), cfg, cfg.deep_deadline)
         print(f"      深度校验完成（{len(deep)} 只）")
     except Exception as e:
         # 东财 K线/F10 被机房 IP 限流时深度校验可能整体失败：降级为只有 Top 榜单，
@@ -145,7 +146,10 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
         cand["rank"] = cand["score"].rank(ascending=False, method="first")
         cand = cand.sort_values("rank")
         top = cand.head(cfg.top_n)
-        deep_disp = deep.loc[top["code"].astype(str)].reset_index()
+        # 只取 deep 里真实存在的 code：深检部分失败/熔断时 deep 缺行，
+        # 直接 .loc[list] 会 KeyError。缺失的让报告侧自行降级显示。
+        deep_codes = [c for c in top["code"].astype(str) if c in deep.index]
+        deep_disp = deep.loc[deep_codes].reset_index() if deep_codes else deep
     else:
         cand["fund_bonus"] = 0.0
         deep_disp = deep

@@ -49,6 +49,8 @@ class Config:
 
         # ---- 深度校验（基本面/成长/技术面/雷区）----
         self.deep_top: int = _env("DEEP_TOP", 50)      # 对综合分前 N 名做深度校验
+        # 深检整体熔断(秒)：东财限流时单只深检几分钟，50只逐只串行会磨数小时
+        self.deep_deadline: int = _env("DEEP_DEADLINE", 600)
         self.roe_min: float = _env("ROE_MIN", 15.0)    # 连续3年ROE及格线(%)
         self.cashflow_min: float = _env("CASHFLOW_MIN", 1.0)  # 经营现金/净利 及格线
         self.debt_max: float = _env("DEBT_MAX", 65.0)  # 资产负债率警戒(%)(银行/地产除外)
@@ -58,6 +60,9 @@ class Config:
         # ---- 历史60日真实波动率（低波动因子数据源）----
         self.vol_days: int = _env("VOL_DAYS", 60)      # 波动率回看天数
         self.vol_concurrency: int = _env("VOL_CONCURRENCY", 8)  # 并行抓取线程数
+        # 全市场K线抓取整体熔断(秒)：东财 push2his 故障时单只超时×重试×全市场会卡数小时，
+        # 到点即用已抓到的部分继续，其余低波因子自动回退当日振幅代理（权重仅0.5）。
+        self.vol_kline_deadline: int = _env("VOL_KLINE_DEADLINE", 240)
         self.vol_annualize: float = _env("VOL_ANNUALIZE", 252.0)  # 年化因子
 
         # ---- 大基金（国家队/社保/公募）新增持股加成 ----

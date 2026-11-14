@@ -407,10 +407,21 @@ def _badges(d: dict, cfg: Config) -> tuple[list[str], str]:
     return b, rec
 
 
-def deep_check(candidates: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """对候选逐只做深度校验，返回含信号列与徽章的 DataFrame。"""
+def deep_check(candidates: pd.DataFrame, cfg: Config,
+               deadline: float | None = 600.0) -> pd.DataFrame:
+    """对候选逐只做深度校验，返回含信号列与徽章的 DataFrame。
+
+    deadline: 整体耗时熔断（秒）。东财 K线/F10 限流时单只深检要几分钟，
+    50 只逐只串行会磨数小时。到点即停止深检剩余的，用已完成的返回。
+    """
+    import time
+    t0 = time.time()
     rows = []
     for _, s in candidates.iterrows():
+        if deadline is not None and (time.time() - t0) > deadline:
+            print(f"      深检已达 {deadline:.0f}s 整体熔断，完成 {len(rows)} 只，其余跳过…",
+                  file=sys.stderr)
+            break
         code = str(s["code"]).zfill(6)
         try:
             k = fetch_kline(code, (dt.date.today() - dt.timedelta(days=400)).strftime("%Y%m%d"),

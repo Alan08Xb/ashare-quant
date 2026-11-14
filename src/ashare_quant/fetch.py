@@ -270,20 +270,38 @@ def fetch_kline_close(code: str, beg: str, end: str) -> pd.Series:
 
 
 def fetch_pool_closes(codes: list[str], beg: str, end: str,
-                      concurrency: int = 8) -> dict[str, pd.Series]:
-    """并发抓取一批股票的历史收盘价。返回 {code: close_Series}，失败/退市股缺席。"""
+                      concurrency: int = 8, deadline: float | None = 240.0) -> dict[str, pd.Series]:
+    """并发抓取一批股票的历史收盘价。返回 {code: close_Series}，失败/退市股缺席。
+
+    deadline: 整体耗时熔断（秒）。东财 push2his 故障时单只 20s 超时×4 次重试，
+    全市场 3500+ 只逐只磨会卡数小时。到点立即停止，用已抓到的部分返回
+    （未启动的任务取消），其余低波因子在 compute_factors 里自动回退当日振幅代理。
+    """
     import concurrent.futures as cf
     out: dict[str, pd.Series] = {}
-    with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
+    ex = cf.ThreadPoolExecutor(max_workers=concurrency)
+    try:
         fut = {ex.submit(fetch_kline_close, c, beg, end): c for c in codes}
-        for f in cf.as_completed(fut):
+        t0 = time.time()
+        # 带超时的 as_completed：到点立刻熔断，不等 in-flight 请求超时
+        for f in cf.as_completed(fut, timeout=None):
             c = fut[f]
             try:
                 s = f.result()
                 if not s.empty:
                     out[c] = s
             except Exception:
-                continue
+                pass
+            if deadline is not None and (time.time() - t0) > deadline:
+                print(f"[kline] 已达 {deadline:.0f}s 整体熔断，覆盖 {len(out)}/{len(codes)} 只，"
+                      f"其余走当日振幅代理…", file=sys.stderr)
+                break
+    except cf.TimeoutError:
+        # 兜底：理论上上面的 deadline 会先触发
+        print(f"[kline] 熔断，覆盖 {len(out)}/{len(codes)} 只…", file=sys.stderr)
+    finally:
+        # 取消排队中未启动的任务；in-flight 的在进程退出时由 Python 兜底 join
+        ex.shutdown(wait=False, cancel_futures=True)
     return out
 
 
