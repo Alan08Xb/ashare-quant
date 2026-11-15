@@ -51,6 +51,10 @@ class Config:
         self.deep_top: int = _env("DEEP_TOP", 50)      # 对综合分前 N 名做深度校验
         # 深检整体熔断(秒)：东财限流时单只深检几分钟，50只逐只串行会磨数小时
         self.deep_deadline: int = _env("DEEP_DEADLINE", 600)
+        # 深检失败自动重试：东财接口故障时深检为空，等一会东财恢复后重跑补深检，
+        # 避免当日深检永久缺失。每次间隔秒数 × 次数（默认 5分×3次≈15分钟）。
+        self.deep_retry_interval: int = _env("DEEP_RETRY_INTERVAL", 300)
+        self.deep_retry_times: int = _env("DEEP_RETRY_TIMES", 3)
         self.roe_min: float = _env("ROE_MIN", 15.0)    # 连续3年ROE及格线(%)
         self.cashflow_min: float = _env("CASHFLOW_MIN", 1.0)  # 经营现金/净利 及格线
         self.debt_max: float = _env("DEBT_MAX", 65.0)  # 资产负债率警戒(%)(银行/地产除外)
