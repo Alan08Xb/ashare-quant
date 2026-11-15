@@ -100,7 +100,7 @@ class Config:
             _env("FIN_W0", 0.6), _env("FIN_W1", 0.2), _env("FIN_W2", 0.2))
 
         # ---- AI 解读（可选，OpenAI 兼容接口）----
-        self.ai_base_url: str = os.environ.get("AI_BASE_URL", "https://api.openai.com/v1")
+        self.ai_base_url: str = os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
         self.ai_api_key: str = os.environ.get("AI_API_KEY", "")
         self.ai_model: str = os.environ.get("AI_MODEL", "gpt-4o-mini")
         self.ai_timeout: int = _env("AI_TIMEOUT", 90)

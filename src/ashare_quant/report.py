@@ -55,6 +55,12 @@ def render_markdown(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.Data
         f"（市值中性化：{'开' if meta.get('size_neutral') else '关'}）",
         "",
     ]
+    if meta.get("degraded"):
+        lines += [
+            "> ⚠️ **今日东财接口异常，数据已降级（新浪源）**：行业/动量等字段缺失，",
+            "> 综合分不具可比性，深度校验可能缺失。仅供参考。",
+            "",
+        ]
     if bt.get("ok"):
         lines += [
             "## 自我检验（基于已积累历史快照）",
@@ -188,6 +194,7 @@ td.big{{font-size:20px;font-weight:700;color:var(--acc)}}
 .hint{{margin:10px 0 0;font-size:12px}}
 .meta{{display:flex;gap:8px;flex-wrap:wrap}}
 .meta span{{background:#22262f;border:1px solid var(--line);padding:4px 10px;border-radius:8px;font-size:12px;color:var(--mut)}}
+.warn{{margin-top:10px;padding:8px 12px;border:1px solid #b58900;border-radius:8px;background:rgba(181,137,0,.12);color:#e8c766;font-size:12px}}
 .disclaimer{{font-size:12px;color:var(--mut);margin-top:20px}}
 </style></head><body><div class="wrap">
 <h1>A股多因子选股 <small>更新于 {now}</small></h1>
@@ -195,6 +202,7 @@ td.big{{font-size:20px;font-weight:700;color:var(--acc)}}
   <span>股票池：{meta.get('universe','')}</span>
   <span>市值中性化：{'开' if meta.get('size_neutral') else '关'}</span>
   <span>权重 价值{meta.get('w_value')} 质量{meta.get('w_quality')} 动量{meta.get('w_momentum')} 低波{meta.get('w_lowvol')}</span>
+  {'<div class="warn">⚠️ 今日东财接口异常，数据已降级（新浪源）：行业/动量等字段缺失，综合分不具可比性，深度校验可能缺失，仅供参考。</div>' if meta.get('degraded') else ''}
 </div>
 {bt_html}
 <div class="card">

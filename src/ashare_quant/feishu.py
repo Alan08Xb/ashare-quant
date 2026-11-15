@@ -143,6 +143,9 @@ def build_card(top: list[dict], meta: dict, backtest: dict, deep: list[dict],
 
     # ---- 顶部：股票池 + 自我检验摘要 ----
     lines = [f"**股票池**：{meta.get('universe', '—')}"]
+    if meta.get("degraded"):
+        lines.append("⚠️ **今日东财接口异常，数据已降级**（新浪源）：行业/动量等字段缺失，"
+                     "综合分不具可比性，深度校验可能缺失。仅供参考。")
     if bt.get("ok"):
         lines.append(
             f"**自我检验**：分组差 {_num(bt.get('spread_mean'), '{:.2%}')} · "

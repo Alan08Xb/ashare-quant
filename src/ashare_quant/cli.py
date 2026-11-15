@@ -164,6 +164,8 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
         "size_neutral": cfg.size_neutral, "topn": cfg.top_n,
         "vol_days": cfg.vol_days, "fund_bonus_new": cfg.fund_bonus_new,
         "exclude_industry": ",".join(cfg.exclude_industry_kw),
+        # 数据降级提示：东财接口故障时 source=sina 且关键字段缺失，分数不具可比性
+        "degraded": source != "eastmoney",
     }
     ai_text = ""
     if cfg.ai_api_key:
