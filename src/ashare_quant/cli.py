@@ -141,6 +141,30 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
                 base = s.iloc[-61] if len(s) >= 61 else s.iloc[0]
                 return float((s.iloc[-1] / base - 1) * 100)
             coarse["ret_60"] = coarse["code"].astype(str).map(_ret60)
+            # 动量兜底：东财 K线覆盖不足时（closes 缺失）用 baostock 补 60 日涨幅，
+            # 避免降级路径动量因子整体失效、分数结构残缺。单只 0.2s，仅补缺失的。
+            missing = coarse["code"].astype(str)[coarse["ret_60"].isna()].tolist()
+            if missing:
+                # baostock socket 长连接非线程安全，必须串行（并发会乱码/卡死）。
+                from .baostock_src import fetch_ret60 as bs_ret60
+                import time as _t
+                cov0 = coarse["ret_60"].notna().sum()
+                _t0 = _t.time()
+                _budget = 120.0   # 动量兜底整体熔断：baostock 抽风时不磨太久，用已补到的继续
+                added = 0
+                for c in missing:
+                    if (_t.time() - _t0) > _budget:
+                        print(f"      动量兜底达 {_budget:.0f}s 熔断，补 {added} 只后停止…",
+                              file=sys.stderr)
+                        break
+                    v = bs_ret60(str(c).zfill(6))
+                    if pd.notna(v):
+                        hit = coarse.index[coarse["code"].astype(str) == c]
+                        if len(hit) > 0:
+                            coarse.loc[hit[0], "ret_60"] = v
+                            added += 1
+                print(f"      动量兜底: 东财K线覆盖 {cov0}/{len(coarse)}, "
+                      f"baostock 补 {added} 只", file=sys.stderr)
             # 次新复核：新浪无上市日，用 baostock 上市日回填后排除不足 N 天的
             if "ipo_date" in fund.columns:
                 coarse["ipo_date"] = coarse["code"].astype(str).map(fund["ipo_date"])
