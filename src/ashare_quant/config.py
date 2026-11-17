@@ -49,8 +49,16 @@ class Config:
 
         # ---- 深度校验（基本面/成长/技术面/雷区）----
         self.deep_top: int = _env("DEEP_TOP", 50)      # 对综合分前 N 名做深度校验
-        # 深检整体熔断(秒)：东财限流时单只深检几分钟，50只逐只串行会磨数小时
-        self.deep_deadline: int = _env("DEEP_DEADLINE", 600)
+        # 深检整体熔断(秒)：东财限流时单只深检几分钟，50只逐只串行会磨数小时。
+        # 并发后仍保留熔断兜底，防止东财长时间抽风时整轮卡死。默认 20 分钟。
+        self.deep_deadline: int = _env("DEEP_DEADLINE", 1200)
+        # 深检并发线程数：东财 K线/F10 是独立 HTTP 请求，线程安全，可并行。
+        # 默认 8 并发，50 只深检从"串行几十分钟"降到"几分钟"内完成，fund_bonus/chip_adj
+        # 能覆盖全部 Top，避免"只有一半被深检、排名加成不一致"。
+        self.deep_concurrency: int = _env("DEEP_CONCURRENCY", 8)
+        # 单只深检的额外重试次数：东财瞬时抖动导致单只失败时，重试 N 次再放弃，
+        # 减少"整段熔断前部分股票因一次抖动被跳过"。配合 deep_concurrency 使用。
+        self.deep_retry_per_stock: int = _env("DEEP_RETRY_PER_STOCK", 2)
         # 深检失败自动重试：东财接口故障时深检为空，等一会东财恢复后重跑补深检，
         # 避免当日深检永久缺失。每次间隔秒数 × 次数（默认 5分×3次≈15分钟）。
         self.deep_retry_interval: int = _env("DEEP_RETRY_INTERVAL", 300)
@@ -68,6 +76,18 @@ class Config:
         # 到点即用已抓到的部分继续，其余低波因子自动回退当日振幅代理（权重仅0.5）。
         self.vol_kline_deadline: int = _env("VOL_KLINE_DEADLINE", 240)
         self.vol_annualize: float = _env("VOL_ANNUALIZE", 252.0)  # 年化因子
+
+        # ---- 静态基本面库（东财通日全市场落盘 / 东财挂日回填慢变因子）----
+        # 行业/ROE/毛利率/净利/上市日 是季度级慢变数据，不必每日重抓。东财通时
+        # save_static 落盘；东财挂(新浪源)时 load_static + merge_static 回填，让
+        # quality 因子与 industry_bonus 在降级路径照样生效，避免退化成低PB银行刷屏。
+        self.static_dir: str = _env("STATIC_DIR", os.path.join(".", "data", "static"))
+        # 降级且无静态库(冷启动,只能 baostock 补齐)时，加绝对质量门槛赶走低价垃圾股：
+        # 行业/ROE/净利缺失的不拦(避免误杀)，有值但 ROE<门槛 或 净利同比<门槛 的剔除。
+        self.degraded_roe_min: float = _env("DEGRADED_ROE_MIN", 10.0)      # ROE 及格线(%)
+        self.degraded_np_yoy_min: float = _env("DEGRADED_NP_YOY_MIN", 0.0) # 净利同比及格线(%)
+
+        # ---- 深度校验并发 ----
 
         # ---- 大基金（国家队/社保/公募）新增持股加成 ----
         self.fund_bonus_new: float = _env("FUND_BONUS_NEW", 0.5)   # 本季新增持大基金 → 分数加成

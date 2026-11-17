@@ -54,7 +54,9 @@ jobs:
           done
           echo "3 次都失败"; exit 1
 
-      # 只提交 docs/（GitHub Pages 公开网页报告）。
+      # 提交 docs/（GitHub Pages 公开网页报告）与 data/static/（静态基本面库）。
+      # 静态库是东财故障日的降级恢复资产，必须随仓库提交才能在 Actions 运行间存活
+      # （每个 run 是全新临时机）。data/static 只有公开市场数据，无隐私，可安全提交。
       # reports/ 与 data/history/ 是隐私，永不提交。仅当选股成功才提交，
       # 休市/无数据时 run 退出、本步不执行，不会用空报告覆盖上一份。
       - name: 提交并推送网页报告
@@ -62,7 +64,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/ 2>/dev/null || true
+          git add docs/ data/static/ 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "今天没有变化，跳过提交"; exit 0
           fi

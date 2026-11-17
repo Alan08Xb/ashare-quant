@@ -27,6 +27,7 @@ from .feishu import push_latest
 from .fetch import fetch_kline, fetch_kline_close, fetch_market_snapshot, fetch_pool_closes
 from .history import list_available_days, save_snapshot
 from .report import write_reports
+from .staticdb import load_static, merge_static, save_static
 from .universe import clean_universe, industry_stats
 
 
@@ -90,6 +91,29 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
         print("!! 未取到数据，可能非交易日或接口异常。", file=sys.stderr)
         sys.exit(2)
 
+    # ---- 静态基本面库：东财通时全市场落盘；东财挂(新浪源)时回填慢变因子 ----
+    # 行业/ROE/毛利率/净利/上市日 是季度级慢变数据。东财通时把全市场这些列存盘，
+    # 东财故障日(新浪源)读回补全，让 quality 因子与 industry_bonus 在降级路径照样
+    # 生效，避免退化成"低 PB 银行/高速刷屏"。static 为空=东财不通且静态库也冷启动。
+    static: dict = {}
+    if source == "eastmoney":
+        try:
+            if save_static(snap, cfg):
+                print(f"      已更新静态基本面库（{dt.date.today().isoformat()}）",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"      !! 静态库写入失败（{type(e).__name__}: {e}），忽略",
+                  file=sys.stderr)
+    else:
+        static = load_static(cfg)
+        if static:
+            snap = merge_static(snap, static)
+            print(f"      已从静态库回填慢变因子（{len(static)} 只：行业/ROE/毛利/净利/上市日）",
+                  file=sys.stderr)
+        else:
+            print("      新浪源且静态库为空（首次冷启动？），走两段式 baostock 补齐降级路径",
+                  file=sys.stderr)
+
     # 盘前/休市保护：A股 09:30 前快照的“最新价 f2”字段多为空("-")，会导致清洗后 0 只，
     # 误以为是选股失败。此时明确提示等待开盘，而不是静默产出空结果。
     prices = pd.to_numeric(snap["price"], errors="coerce")
@@ -116,8 +140,12 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     vol_map = {c: annualized_vol(s, cfg.vol_days, cfg.vol_annualize) for c, s in closes.items()}
     print(f"      波动率覆盖 {len(vol_map)}/{len(uni)} 只")
 
-    if source == "sina":
-        # ===== 新浪快照降级路径：两段式筛选 =====
+    # 新浪源若已回填静态库(行业/ROE/毛利/净利/上市日)，quality 与 industry_bonus 已生效，
+    # 走和东财一样的单遍打分，不再两段式(那段只为补缺失基本面)。仅当新浪源且静态库也为空
+    # (首次冷启动，只能靠 baostock 补)才走两段式，并加绝对质量门槛防低价垃圾股刷屏。
+    use_two_stage = (source == "sina" and not static)
+    if use_two_stage:
+        # ===== 新浪快照降级 + 静态库冷启动：两段式筛选 =====
         # 第一段：新浪只有估值/流动性字段（质量/成长/行业缺列自动归 0）→ 粗筛 top coarse_top
         print(f"[3a/6] 粗筛（仅估值/流动性因子）→ top {cfg.coarse_top} ...")
         first_pass = compute_factors(uni, cfg, vol_map)          # 全市场因子表（回测归档用）
@@ -179,6 +207,22 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
             _cov = lambda c: f"{c} {int(fund[c].notna().sum())}/{len(fund)}" if c in fund.columns else f"{c} 缺列"
             print(f"      baostock 补齐: {_cov('roe')} | {_cov('np_yoy')} | "
                   f"ret_60 {int(coarse['ret_60'].notna().sum())}/{len(coarse)}")
+        # 冷启动质量门槛：两段式只能用 baostock 补 ROE/净利，粗筛池偏小(100只)、z-score
+        # 横截面窄，易被"低 PB 稳定股(银行/高速)"主导。加绝对门槛把 ROE<阈值 或 净利同比
+        # <阈值 的低价垃圾股直接剔掉(缺失值不拦，避免误杀 baostock 没补到的)。
+        _mask = pd.Series(True, index=coarse.index)
+        if "roe" in coarse.columns:
+            _roe = pd.to_numeric(coarse["roe"], errors="coerce")
+            _mask &= (_roe.isna() | (_roe >= cfg.degraded_roe_min))
+        if "np_yoy" in coarse.columns:
+            _npy = pd.to_numeric(coarse["np_yoy"], errors="coerce")
+            _mask &= (_npy.isna() | (_npy >= cfg.degraded_np_yoy_min))
+        _before = len(coarse)
+        coarse = coarse[_mask]
+        if len(coarse) < _before:
+            print(f"      降级质量门槛: {_before} → {len(coarse)} 只 "
+                  f"(ROE≥{cfg.degraded_roe_min:.0f}%或缺失 & 净利同比≥{cfg.degraded_np_yoy_min:.0f}%或缺失)",
+                  file=sys.stderr)
         print("[3c/6] 二次精筛（质量/成长/动量因子已生效）...")
         scored = compute_factors(coarse, cfg, vol_map)
     else:

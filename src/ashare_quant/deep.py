@@ -407,22 +407,16 @@ def _badges(d: dict, cfg: Config) -> tuple[list[str], str]:
     return b, rec
 
 
-def deep_check(candidates: pd.DataFrame, cfg: Config,
-               deadline: float | None = 600.0) -> pd.DataFrame:
-    """对候选逐只做深度校验，返回含信号列与徽章的 DataFrame。
+def _deep_one(code: str, s, cfg: Config) -> dict | None:
+    """对单只候选做完整深检，返回信号 dict；多次重试后仍失败返回 None（不中断整体）。
 
-    deadline: 整体耗时熔断（秒）。东财 K线/F10 限流时单只深检要几分钟，
-    50 只逐只串行会磨数小时。到点即停止深检剩余的，用已完成的返回。
+    每只内部做 5 次东财请求（K线/F10主营/F10负债/十大股东/质押）。东财瞬时抖动
+    可能让某一两次失败，这里整只重试 cfg.deep_retry_per_stock 次再放弃，减少
+    "并发下部分股票因一次抖动被跳过"。
     """
     import time
-    t0 = time.time()
-    rows = []
-    for _, s in candidates.iterrows():
-        if deadline is not None and (time.time() - t0) > deadline:
-            print(f"      深检已达 {deadline:.0f}s 整体熔断，完成 {len(rows)} 只，其余跳过…",
-                  file=sys.stderr)
-            break
-        code = str(s["code"]).zfill(6)
+    last_exc: Exception | None = None
+    for attempt in range(cfg.deep_retry_per_stock + 1):
         try:
             k = fetch_kline(code, (dt.date.today() - dt.timedelta(days=400)).strftime("%Y%m%d"),
                             dt.date.today().strftime("%Y%m%d"))
@@ -464,9 +458,55 @@ def deep_check(candidates: pd.DataFrame, cfg: Config,
                 badges.append("追高·接盘风险⚠")
             d["badges"] = " | ".join(badges) if badges else "数据不足"
             d["rec"] = rec
-            rows.append(d)
+            return d
         except Exception as e:
-            # 单只数据源（K线/F10）不可用时跳过该只，避免整段深检崩掉整个 run
-            print(f"      深检 {code} 失败（{type(e).__name__}: {e}），跳过", file=sys.stderr)
-            continue
+            last_exc = e
+            if attempt < cfg.deep_retry_per_stock:
+                time.sleep(1.0 + attempt)       # 退避后整只重试
+    # 多次重试后仍失败：只跳这一只，不中断整体
+    print(f"      深检 {code} 重试 {cfg.deep_retry_per_stock} 次仍失败"
+          f"（{type(last_exc).__name__}: {last_exc}），跳过", file=sys.stderr)
+    return None
+
+
+def deep_check(candidates: pd.DataFrame, cfg: Config,
+               deadline: float | None = 1200.0) -> pd.DataFrame:
+    """对候选逐只做深度校验，返回含信号列与徽章的 DataFrame。
+
+    并发：东财 K线/F10 是独立 HTTP 请求，线程安全，用 cfg.deep_concurrency 个线程
+    并行逐只深检，单只内再带重试。相比原串行实现，同样熔断时间内能检完全部候选，
+    让 fund_bonus / chip_adj 加成覆盖所有 Top（不再只有一半被深检、排名加成不一致）。
+
+    deadline: 整体耗时熔断（秒）。东财 K线/F10 长期故障时到点即停，用已完成的返回。
+    """
+    import time
+    from concurrent import futures as cf
+
+    deadline = cfg.deep_deadline if deadline is None else deadline
+    t0 = time.time()
+    rows = []
+    codes = [str(c).zfill(6) for c in candidates["code"].tolist()]
+    names = {str(s["code"]).zfill(6): s.get("name") for _, s in candidates.iterrows()}
+
+    ex = cf.ThreadPoolExecutor(max_workers=max(1, cfg.deep_concurrency))
+    try:
+        futs = {}
+        # 逐只提交，未提交完的由熔断截止
+        for c in codes:
+            if deadline is not None and (time.time() - t0) > deadline:
+                break
+            futs[ex.submit(_deep_one, c, {"name": names.get(c)}, cfg)] = c
+        for f in cf.as_completed(futs, timeout=None):
+            try:
+                d = f.result()
+                if d is not None:
+                    rows.append(d)
+            except Exception:
+                pass
+            if deadline is not None and (time.time() - t0) > deadline:
+                print(f"      深检已达 {deadline:.0f}s 整体熔断，完成 {len(rows)}/{len(codes)} 只，"
+                      f"其余跳过…", file=sys.stderr)
+                break
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return pd.DataFrame(rows)
