@@ -118,13 +118,14 @@ def compute_factors(df: pd.DataFrame, cfg: Config, vol_map: dict | None = None) 
         d[c] = size_neutralize(d, d[c], cfg)
     # 行业政策因子不中性化（本身是离散政策性加分）
 
-    # 综合分
+    # 综合分 = 纯四因子分（价值/质量/动量/低波动）。行业政策加成 f_industry 是
+    # 离散政策性加分，与 z-score 因子不同量纲，不混进纯因子分——在精调层(见 cli 的
+    # score_adj)单独并入，避免污染因子回测的归因口径。
     d["score"] = (
         cfg.w_value * d["f_value"]
         + cfg.w_quality * d["f_quality"]
         + cfg.w_momentum * d["f_momentum"]
         + cfg.w_lowvol * d["f_lowvol"]
-        + d["f_industry"]
     )
     d["rank"] = d["score"].rank(ascending=False, method="first")
     return d

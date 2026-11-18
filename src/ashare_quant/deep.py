@@ -70,62 +70,109 @@ def technical(k: pd.DataFrame) -> dict:
     }
 
 
-def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
-    """筹码分布估算（基于历史换手率衰减，非精确数据，勿当主力底牌）。
+def chip_distribution(k: pd.DataFrame, window: int = 120, bins: int = 90) -> dict:
+    """筹码分布估算（三角分布 + 换手衰减，非精确数据，勿当主力底牌）。
 
-    算法：每一天的成交价按当日换手率作为“当日在现价换手”的权重，并乘以后续各日的
-    (1-换手率) 存活衰减，得到该天成本仍被持有的比重，最后归一化为分布。
+    算法（对比旧版"逐日单点+换手衰减"）：
+      1. 把窗口内 [最低, 最高] 价格区间划分为 bins 个价格带；
+      2. 对每一天，该日成交量按"三角分布"摊到当日 [low, high] 的各个价格带上：
+         峰值位于均价 (O+C+H+L)/4，向两端线性衰减为 0（一字板则全量堆在该价）；
+      3. 每天先按当日换手率 t 对全部存量筹码做衰减 (1-t)，再叠加当日新增三角筹码；
+      4. 最后归一化，得各价格带的筹码占比。
+    相比旧版"每天只有一个价点"更贴近真实成交分布，获利盘/集中度更可信。
     """
-    if len(k) < 60:
+    if len(k) < 60 or "turnover" not in k.columns:
         return {"ok": False}
     k = k.tail(window).copy()
-    close = k["close"].values
-    turn = np.nan_to_num(k["turnover"].values, nan=0.0).clip(0, 3) / 100.0
+    o = k["open"].values.astype(float)
+    c = k["close"].values.astype(float)
+    h = k["high"].values.astype(float)
+    l = k["low"].values.astype(float)
+    turn = np.nan_to_num(k["turnover"].values.astype(float), nan=0.0).clip(0, 100) / 100.0
     n = len(k)
-    w = np.zeros(n)
+    lo, hi = l.min(), h.max()
+    if not (hi > lo) or np.isnan(hi) or np.isnan(lo):
+        return {"ok": False}
+    step = (hi - lo) / bins
+    if step <= 0:
+        return {"ok": False}
+    edges = np.linspace(lo, hi, bins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2
+    x = np.zeros(bins)
+    # 每天：先衰减，再按三角分布叠加当日换手筹码
     for i in range(n):
-        f = turn[i]
-        surv = 1.0
-        for j in range(i + 1, n):
-            surv *= max(1.0 - turn[j], 0.0)
-        w[i] = f * surv
-    if w.sum() <= 1e-9:
-        w[:] = 1.0
-    w = w / w.sum()
-    last = close[-1]
+        t = min(turn[i], 1.0)
+        if t <= 0:
+            continue
+        x *= (1.0 - t)
+        avg = (o[i] + c[i] + h[i] + l[i]) / 4.0
+        if h[i] == l[i]:                    # 一字板：全量堆在均价带
+            j = int(np.clip((avg - lo) / step, 0, bins - 1))
+            x[j] += t
+        else:
+            L = int(np.clip((l[i] - lo) / step, 0, bins - 1))
+            H = int(np.clip((h[i] - lo) / step, 0, bins - 1))
+            peak = 2.0 / (h[i] - l[i])      # 使三角形面积积分 = 1
+            for j in range(L, H + 1):
+                p = centers[j]
+                if p <= avg:
+                    w = (p - l[i]) / (avg - l[i]) if avg > l[i] else 1.0
+                else:
+                    w = (h[i] - p) / (h[i] - avg) if h[i] > avg else 1.0
+                x[j] += t * peak * w
+    if x.sum() <= 1e-9:
+        return {"ok": False}
+    x = x / x.sum()
+    last = c[-1]
 
-    profit = float(w[close < last].sum())            # 获利盘比例
-    cost_line = float((close * w).sum())             # 平均成本（筹码加权均价）
+    profit = float(x[centers < last].sum())        # 获利盘比例
+    cost_line = float((centers * x).sum())         # 平均成本（筹码加权均价）
     dev_cost = last / cost_line - 1 if cost_line > 0 else np.nan
 
-    # 30 日筹码成本均线：仅用最近 30 根 K 线重算，作为"主力近期建仓成本"近似
-    k30 = k.tail(30).copy()
-    c30 = k30["close"].values
-    t30 = np.nan_to_num(k30["turnover"].values, nan=0.0).clip(0, 3) / 100.0
+    # 30 日主力筹码成本均线：仅用最近 30 根 K 线重算（同算法）
+    k30 = k.tail(30)
+    o30 = k30["open"].values.astype(float)
+    c30 = k30["close"].values.astype(float)
+    h30 = k30["high"].values.astype(float)
+    l30 = k30["low"].values.astype(float)
+    t30 = np.nan_to_num(k30["turnover"].values.astype(float), nan=0.0).clip(0, 100) / 100.0
     m = len(k30)
-    w30 = np.zeros(m)
-    for i in range(m):
-        f = t30[i]
-        surv = 1.0
-        for j in range(i + 1, m):
-            surv *= max(1.0 - t30[j], 0.0)
-        w30[i] = f * surv
-    if w30.sum() > 1e-9:
-        w30 = w30 / w30.sum()
-        main_cost = float((c30 * w30).sum())
+    lo30, hi30 = l30.min(), h30.max()
+    if m >= 20 and hi30 > lo30 and not np.isnan(hi30):
+        step30 = (hi30 - lo30) / bins
+        edges30 = np.linspace(lo30, hi30, bins + 1)
+        centers30 = (edges30[:-1] + edges30[1:]) / 2
+        x30 = np.zeros(bins)
+        for i in range(m):
+            t = min(t30[i], 1.0)
+            if t <= 0:
+                continue
+            x30 *= (1.0 - t)
+            avg = (o30[i] + c30[i] + h30[i] + l30[i]) / 4.0
+            if h30[i] == l30[i]:
+                x30[int(np.clip((avg - lo30) / step30, 0, bins - 1))] += t
+            else:
+                L = int(np.clip((l30[i] - lo30) / step30, 0, bins - 1))
+                H = int(np.clip((h30[i] - lo30) / step30, 0, bins - 1))
+                peak = 2.0 / (h30[i] - l30[i])
+                for j in range(L, H + 1):
+                    p = centers30[j]
+                    if p <= avg:
+                        w = (p - l30[i]) / (avg - l30[i]) if avg > l30[i] else 1.0
+                    else:
+                        w = (h30[i] - p) / (h30[i] - avg) if h30[i] > avg else 1.0
+                    x30[j] += t * peak * w
+        if x30.sum() > 1e-9:
+            main_cost = float((centers30 * (x30 / x30.sum())).sum())
+        else:
+            main_cost = float(np.nan)
     else:
         main_cost = float(np.nan)
 
-    # 峰数判定（在价格直方图上找局部峰）
-    bins = 60
-    edges = np.linspace(close.min(), close.max(), bins + 1)
-    hist, _ = np.histogram(close, bins=edges, weights=w)
-    centers = (edges[:-1] + edges[1:]) / 2
-    sm = np.convolve(hist, np.ones(3) / 3, mode="same")
-    peaks = []
-    for i in range(1, bins - 1):
-        if sm[i] > sm[i - 1] and sm[i] >= sm[i + 1] and sm[i] > 0.05:
-            peaks.append(i)
+    # 峰数判定（在筹码分布上找局部峰）
+    sm = np.convolve(x, np.ones(3) / 3, mode="same")
+    peaks = [i for i in range(1, bins - 1)
+             if sm[i] > sm[i - 1] and sm[i] >= sm[i + 1] and sm[i] > 0.05]
     if len(peaks) == 0:
         peak_state = "发散"
     elif len(peaks) == 1:
@@ -134,11 +181,17 @@ def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
         peak_state = "双峰"
     else:
         peak_state = "多峰"
-    # 90% 筹码价位区间（下沿/上沿）
-    order = np.argsort(close)
-    cw = w[order].cumsum()
-    lo9 = close[order][np.searchsorted(cw, 0.05)]
-    hi9 = close[order][np.searchsorted(cw, 0.95)]
+    # 90% / 70% 筹码集中度：对应分位价格带的收窄程度，越小越集中
+    cum = np.cumsum(x)
+
+    def _quantile(q: float) -> float:
+        idx = int(np.searchsorted(cum, q))
+        return float(centers[min(idx, bins - 1)])
+
+    lo90, hi90 = _quantile(0.05), _quantile(0.95)
+    lo70, hi70 = _quantile(0.15), _quantile(0.85)
+    conc90 = (hi90 - lo90) / (hi90 + lo90) if hi90 + lo90 > 0 else np.nan
+    conc70 = (hi70 - lo70) / (hi70 + lo70) if hi70 + lo70 > 0 else np.nan
     return {
         "ok": True,
         "profit": profit,
@@ -146,9 +199,97 @@ def chip_distribution(k: pd.DataFrame, window: int = 120) -> dict:
         "main_cost": main_cost,          # 30 日主力筹码成本均线
         "close_vs_cost": dev_cost,
         "peak_state": peak_state,
-        "chip_lo": lo9,
-        "chip_hi": hi9,
+        "chip_lo": lo90,
+        "chip_hi": hi90,
+        "conc90": conc90,                # 90%筹码集中度
+        "conc70": conc70,                # 70%筹码集中度
     }
+
+
+# ---------------- 结构形态策略 ----------------
+
+def pattern_yearly_pullback(k: pd.DataFrame, lookback: int = 60) -> bool:
+    """回踩年线策略：趋势上行后缩量回踩年线获支撑。
+
+    规则：
+      1. 取最近 lookback 日；前段为期间最高收盘价之前的 K 线，后段为其后；
+      2. 前段首日收盘在年线(250日)下方、末日收盘在年线上方（即完成上穿年线）；
+      3. 后段全程收盘都在年线上方（回踩不破年线）；
+      4. 最高价日到后段最低价日相隔 10~50 个自然日；
+      5. 回踩缩量：最高价日量 / 后段最低量日量 > 2，且回踩低点价 / 高点价 < 0.8。
+    """
+    if k is None or len(k) < 250 + lookback:
+        return False
+    kk = k.copy()
+    kk["ma250"] = kk["close"].rolling(250).mean()
+    seg = kk.tail(lookback).dropna(subset=["ma250"])
+    if len(seg) < 10:
+        return False
+    i_hi = seg["close"].idxmax()
+    front = seg.loc[seg.index < i_hi]
+    back = seg.loc[seg.index >= i_hi]
+    if len(front) < 5 or len(back) < 5:
+        return False
+    # 前段上穿年线
+    if not (front.iloc[0]["close"] < front.iloc[0]["ma250"]
+            and front.iloc[-1]["close"] > front.iloc[-1]["ma250"]):
+        return False
+    # 后段全程不破年线
+    if (back["close"] < back["ma250"]).any():
+        return False
+    i_lo = back["close"].idxmin()
+    days = (seg.loc[i_lo, "date"] - seg.loc[i_hi, "date"]).days
+    if not (10 <= days <= 50):
+        return False
+    v_hi, v_lo = seg.loc[i_hi, "volume"], seg.loc[i_lo, "volume"]
+    if v_lo <= 0 or v_hi / v_lo <= 2:
+        return False
+    if seg.loc[i_lo, "close"] / seg.loc[i_hi, "close"] >= 0.8:
+        return False
+    return True
+
+
+def pattern_platform_breakout(k: pd.DataFrame, lookback: int = 60,
+                              min_amount: float = 0.0) -> bool:
+    """平台突破策略：长期平台整理后放量突破年线区间上沿。
+
+    规则：
+      1. 取最近 lookback 日，找到某日：收盘价 ≥ 60日线 > 开盘价（放量长阳上穿60日线）；
+      2. 该日当日放量上涨：涨跌幅≥2%、收盘≥开盘、量/5日均量≥2；
+         （成交额门槛 min_amount 仅当>0才启用；深检池已过 min_amount 清洗，默认不额外卡额）
+      3. 且突破之前的该区间内，任意一日收盘价与 60 日线的偏离都在 -5%~20%（平台区间不破位）。
+    """
+    if k is None or len(k) < 60 + lookback:
+        return False
+    kk = k.copy()
+    kk["ma60"] = kk["close"].rolling(60).mean()
+    kk["vol5"] = kk["volume"].rolling(5).mean()
+    seg = kk.tail(lookback).dropna(subset=["ma60", "vol5"])
+    if len(seg) < 10:
+        return False
+    idx = list(seg.index)
+    for i, di in enumerate(idx):
+        row = seg.loc[di]
+        if not (row["close"] >= row["ma60"] > row["open"]):
+            continue
+        if row["close"] < row["open"]:
+            continue
+        if min_amount > 0 and row["amount"] < min_amount:
+            continue
+        if row["volume"] / row["vol5"] < 2:
+            continue
+        prev_close = seg["close"].iloc[i - 1] if i > 0 else np.nan
+        if np.isnan(prev_close) or row["close"] / prev_close - 1 < 0.02:
+            continue
+        # 突破之前：平台区间收盘与60日线偏离在 -5%~20%
+        before = seg.loc[seg.index < di]
+        if len(before) < 5:
+            continue
+        dev = (before["close"] - before["ma60"]) / before["ma60"]
+        if ((dev < -0.05) | (dev > 0.20)).any():
+            continue
+        return True
+    return False
 
 
 # ---------------- 基本面 ----------------
@@ -312,6 +453,7 @@ def chip_adjust(d: dict, cfg: Config) -> float:
     """筹码位置对综合分的调整（应用“主力浮盈→接盘风险 / 主力浮盈小→机会”逻辑）。
 
     负数=追高/接盘风险(减分)，正数=贴近成本且基本面好的机会(加分)。
+    新增：筹码高度集中(conc90<阈值) + 基本面好 → 主力锁仓、抛压小 → 加分。
     """
     dev, profit = d.get("close_vs_cost"), d.get("profit")
     if not d.get("chip_ok") or pd.isna(dev) or pd.isna(profit):
@@ -333,6 +475,10 @@ def chip_adjust(d: dict, cfg: Config) -> float:
         bonus = cfg.chip_bonus
     elif quality_ok and dev < -cfg.chip_bonus_dev and profit <= 0.35:
         bonus = cfg.chip_bonus_dip   # 主力明显浮亏 + 基本面好 → 超跌机会
+    # 筹码高度集中 + 基本面好 → 主力锁仓、抛压小
+    c90 = d.get("conc90")
+    if quality_ok and c90 is not None and c90 == c90 and c90 < cfg.chip_conc_tight:
+        bonus += float(cfg.chip_bonus_conc)
     return bonus - pen
 
 
@@ -354,6 +500,14 @@ def _badges(d: dict, cfg: Config) -> tuple[list[str], str]:
     if d.get("chip_ok"):
         b.append(f"筹码{d.get('peak_state')}·获利盘{d.get('profit', 0):.0%}")
         b.append(f"价/成本线{d.get('close_vs_cost', float('nan')):+.0%}")
+        c90 = d.get("conc90")
+        if c90 is not None and c90 == c90:   # 非 None 且非 NaN
+            b.append(("筹码集中✓" if c90 < cfg.chip_conc_tight else f"筹码{c90:.0%}"))
+    # 结构形态买点
+    if d.get("pattern_yearly"):
+        b.append("回踩年线✓")
+    if d.get("pattern_platform"):
+        b.append("平台突破✓")
 
     # 基本面
     if d.get("fund_ok"):
@@ -396,7 +550,10 @@ def _badges(d: dict, cfg: Config) -> tuple[list[str], str]:
     if hard_risk:
         rec = "回避·雷区"
     elif quality_ok and not (pd.notna(db) and db > cfg.debt_max):
-        if d.get("ma_state") == "多头" and d.get("close_vs_ma20", 9) <= 0.05 and d.get("price_perc", 1) <= 0.9:
+        # 结构形态买点命中 → 优先观察
+        if (d.get("pattern_yearly") or d.get("pattern_platform")):
+            rec = "优选·形态买点✓"
+        elif d.get("ma_state") == "多头" and d.get("close_vs_ma20", 9) <= 0.05 and d.get("price_perc", 1) <= 0.9:
             rec = "优选·可分批观察"
         elif d.get("ma_state") == "多头":
             rec = "趋势向上·等回踩"
@@ -418,10 +575,14 @@ def _deep_one(code: str, s, cfg: Config) -> dict | None:
     last_exc: Exception | None = None
     for attempt in range(cfg.deep_retry_per_stock + 1):
         try:
-            k = fetch_kline(code, (dt.date.today() - dt.timedelta(days=400)).strftime("%Y%m%d"),
+            k = fetch_kline(code, (dt.date.today() - dt.timedelta(days=520)).strftime("%Y%m%d"),
                             dt.date.today().strftime("%Y%m%d"))
             tech = technical(k)
             chip = chip_distribution(k)
+            # 结构形态买点（回踩年线 / 平台突破）
+            pat_yearly = pattern_yearly_pullback(k, cfg.pattern_yearly_days) if cfg.pattern_enable else False
+            pat_platform = pattern_platform_breakout(k, cfg.pattern_platform_days,
+                                             float(cfg.pattern_min_amount)) if cfg.pattern_enable else False
             fund = fundamental(code, cfg)
             pl = pledge_ratio(code) if fund.get("ok") else None
             fh = fund_holding(code, cfg)
@@ -446,6 +607,10 @@ def _deep_one(code: str, s, cfg: Config) -> dict | None:
             d["cost_line"] = bz.get("cost_line")
             d["main_cost"] = bz.get("main_cost")
             d["code"], d["name"] = code, s.get("name")
+            d["pattern_yearly"] = pat_yearly
+            d["pattern_platform"] = pat_platform
+            d["pattern_adj"] = float(cfg.pattern_bonus if pat_yearly else 0.0) \
+                + float(cfg.pattern_bonus if pat_platform else 0.0)
             d["chip_adj"] = chip_adjust(d, cfg)
             badges, rec = _badges(d, cfg)
             if fh.get("new"):

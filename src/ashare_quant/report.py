@@ -26,6 +26,7 @@ FMT = {
     "floatcap": "{:.0f}亿",
     "turnover": "{:.1f}%",
     "score": "{:.2f}",
+    "score_adj": "{:.2f}",
 }
 
 
@@ -65,13 +66,19 @@ def render_markdown(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.Data
         lines += [
             "## 自我检验（基于已积累历史快照）",
             "",
-            f"| 有效天数 | 分组均值收益(最高分-最低分) | RankIC | ICIR | 多头占优天数占比 |",
+            "| 周期 | 分组均值收益(最高分-最低分) | RankIC | ICIR | 多头占优天数占比 |",
             "|---|---|---|---|---|",
-            f"| {bt.get('valid_days')} | {bt.get('spread_mean','—'):.2%} | "
-            f"{bt.get('ic_mean','—'):.3f} | {bt.get('icir','—'):.2f} | {bt.get('hit_rate','—'):.0%} |",
+        ]
+        hz = bt.get("horizons", {})
+        for n in sorted(hz, key=int):
+            p = hz[n]
+            lines.append(f"| {n}日 | {p['spread_mean']:.2%} | {p['ic_mean']:.3f} | "
+                         f"{p['icir']:.2f} | {p['hit_rate']:.0%} |")
+        lines += [
             "",
-            "> 说明：此表用“次日收盘/当日收盘-1”近似收益，衡量综合分对未来收益的预测力。"
-            "历史天数越少越不具统计意义；建议积累 60 个交易日后才参考。",
+            f"> 说明：用“后 N 个快照日收盘/当日收盘-1”近似 N 周期收益，衡量综合分对未来收益的预测力。",
+            f"> 按快照日近似（非交易日）：停牌/退市的股票会从快照序列中消失，导致其 fwd_N 实际跨过更多自然日。",
+            f"> 主周期 {bt.get('main_horizon')}日（持仓周期）。历史天数越少越不具统计意义；建议积累 60 个交易日后才参考。",
             "",
         ]
     else:
@@ -85,13 +92,13 @@ def render_markdown(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.Data
     lines += ["## Top 组合", ""]
     cols = [c for c in ["rank", "code", "name", "industry", "price", "pct",
                         "ret_60", "roe", "np_yoy", "gross_margin", "pe", "pb",
-                        "floatcap", "turnover", "score"] if c in top.columns]
+                        "floatcap", "turnover", "score_adj", "score"] if c in top.columns]
     disp = _fmt_series(top[cols].copy())
     header = "| " + " | ".join({"rank": "排名", "code": "代码", "name": "名称", "industry": "行业",
                                 "price": "现价", "pct": "今涨跌", "ret_60": "60日涨幅",
                                 "roe": "ROE%", "np_yoy": "净利同比", "gross_margin": "毛利率",
                                 "pe": "PE", "pb": "PB", "floatcap": "流通市值",
-                                "turnover": "换手", "score": "综合分"}.get(c, c) for c in cols) + " |"
+                                "turnover": "换手", "score_adj": "精调分", "score": "因子分"}.get(c, c) for c in cols) + " |"
     sep = "|" + "---|" * len(cols)
     rows = [header, sep]
     for _, r in disp.iterrows():
@@ -100,11 +107,11 @@ def render_markdown(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.Data
     lines += ["", "### 深度校验（基本面 / 技术面 / 雷区）", "",
               "> 建议标签是规则化归类，不是荐股；雷区类需自行再核对数据。", ""]
     if deep is not None and not deep.empty:
-        dcols = [c for c in ["code", "name", "buy", "stop", "ma20", "main_cost", "chip_adj", "rec", "badges"] if c in deep.columns]
+        dcols = [c for c in ["code", "name", "buy", "stop", "ma20", "main_cost", "conc90", "chip_adj", "pattern_adj", "rec", "badges"] if c in deep.columns]
         if dcols:
             dhead = {"code": "代码", "name": "名称", "buy": "建议买入", "stop": "止损参考",
-                     "ma20": "20日线", "main_cost": "30日主力成本",
-                     "chip_adj": "筹码调整", "rec": "规则建议", "badges": "信号徽章"}
+                     "ma20": "20日线", "main_cost": "30日主力成本", "conc90": "90%筹码集中度",
+                     "chip_adj": "筹码调整", "pattern_adj": "形态加分", "rec": "规则建议", "badges": "信号徽章"}
             lines.append("| " + " | ".join(dhead[c] for c in dcols) + " |")
             lines.append("|" + "---|" * len(dcols))
             for _, r in deep[dcols].iterrows():
@@ -123,18 +130,22 @@ def render_html(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.DataFram
     bt = backtest or {}
     bt_html = ""
     if bt.get("ok"):
-        bt_html = f"""
-        <div class="card">
-          <h3>自我检验 <span class="tag">历史 {bt.get('days')} 个交易日</span></h3>
-          <table class="bt">
-            <tr><th>分组收益(最高分−最低分)</th><th>RankIC</th><th>ICIR</th><th>多头占优占比</th></tr>
-            <tr><td class="big">{bt.get('spread_mean','—'):.2%}</td>
-                <td>{bt.get('ic_mean','—'):.3f}</td>
-                <td>{bt.get('icir','—'):.2f}</td>
-                <td>{bt.get('hit_rate','—'):.0%}</td></tr>
-          </table>
-          <p class="hint">次日收盘/当日收盘−1 近似收益 · 分数越高后续收益是否越高，数据自己说话。积累 60 个交易日后才有统计意义。</p>
-        </div>"""
+            hz = bt.get("horizons", {})
+            rows = []
+            for n in sorted(hz, key=int):
+                p = hz[n]
+                rows.append(f"<tr><td>{n}日</td><td class=\"big\">{p['spread_mean']:.2%}</td>"
+                            f"<td>{p['ic_mean']:.3f}</td><td>{p['icir']:.2f}</td>"
+                            f"<td>{p['hit_rate']:.0%}</td><td>{p['valid_days']}天</td></tr>")
+            bt_html = f""""
+            <div class="card">
+              <h3>自我检验 <span class="tag">历史 {bt.get('days')} 个交易日 · 主周期 {bt.get('main_horizon')}日</span></h3>
+              <table class="bt">
+                <tr><th>周期</th><th>分组收益(最高分−最低分)</th><th>RankIC</th><th>ICIR</th><th>多头占优占比</th><th>样本天数</th></tr>
+                {''.join(rows)}
+              </table>
+              <p class="hint">后 N 个快照日收盘/当日收盘−1 近似收益（非交易日：停牌/退市股会跨更多自然日）· 分数越高后续收益是否越高，数据自己说话。积累 60 个交易日后才有统计意义。</p>
+            </div>"""
     else:
         bt_html = f"""
         <div class="card"><h3>自我检验</h3>
@@ -142,12 +153,12 @@ def render_html(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.DataFram
 
     cols = [c for c in ["rank", "code", "name", "industry", "price", "pct",
                         "ret_60", "roe", "np_yoy", "gross_margin", "pe", "pb",
-                        "floatcap", "turnover", "score"] if c in top.columns]
+                        "floatcap", "turnover", "score_adj", "score"] if c in top.columns]
     disp = _fmt_series(top[cols].copy())
     heads = {"rank": "排名", "code": "代码", "name": "名称", "industry": "行业",
              "price": "现价", "pct": "今涨跌", "ret_60": "60日涨幅", "roe": "ROE%",
              "np_yoy": "净利同比", "gross_margin": "毛利率", "pe": "PE", "pb": "PB",
-             "floatcap": "流通市值", "turnover": "换手", "score": "综合分"}
+             "floatcap": "流通市值", "turnover": "换手", "score_adj": "精调分", "score": "因子分"}
     thead = "".join(f"<th>{heads.get(c, c)}</th>" for c in cols)
     trs = []
     for _, r in disp.iterrows():
@@ -158,11 +169,11 @@ def render_html(top: pd.DataFrame, meta: dict, backtest: dict, deep: pd.DataFram
     # 深度校验卡片
     deep_html = ""
     if deep is not None and not deep.empty:
-        dcols = [c for c in ["code", "name", "buy", "stop", "ma20", "main_cost", "chip_adj", "rec", "badges"] if c in deep.columns]
+        dcols = [c for c in ["code", "name", "buy", "stop", "ma20", "main_cost", "conc90", "chip_adj", "pattern_adj", "rec", "badges"] if c in deep.columns]
         if dcols:
             dheads = {"code": "代码", "name": "名称", "buy": "建议买入", "stop": "止损参考",
-                      "ma20": "20日线", "main_cost": "30日主力成本",
-                      "chip_adj": "筹码调整", "rec": "规则建议", "badges": "信号徽章"}
+                      "ma20": "20日线", "main_cost": "30日主力成本", "conc90": "90%筹码集中度",
+                      "chip_adj": "筹码调整", "pattern_adj": "形态加分", "rec": "规则建议", "badges": "信号徽章"}
             dthead = "".join(f"<th>{dheads.get(c, c)}</th>" for c in dcols)
             dtrs = []
             for _, r in deep[dcols].iterrows():

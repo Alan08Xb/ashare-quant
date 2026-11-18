@@ -16,6 +16,7 @@ import datetime as dt
 import json
 import sys
 
+import numpy as np
 import pandas as pd
 
 from .ai import ai_interpret, save_json_field, write_ai_report
@@ -25,7 +26,7 @@ from .deep import deep_check
 from .factors import annualized_vol, compute_factors
 from .feishu import push_latest
 from .fetch import fetch_kline, fetch_kline_close, fetch_market_snapshot, fetch_pool_closes
-from .history import list_available_days, save_snapshot
+from .history import list_available_days, load_deep_history, load_history, save_deep_snapshot, save_snapshot
 from .report import write_reports
 from .staticdb import load_static, merge_static, save_static
 from .universe import clean_universe, industry_stats
@@ -245,8 +246,13 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     print(f"[4.5/6] 深度校验 Top {cfg.deep_top}（基本面/技术面/雷区/大基金）...")
     deep = _deep_with_retry(cand.head(cfg.deep_top), cfg)
     print(f"      深度校验完成（{len(deep)} 只）")
+    # 深检信号单独存档：供日后对“深检规则(筹码/形态/买点)历史命中率”回测
+    if not deep.empty:
+        save_deep_snapshot(deep, cfg, day)
 
-    # 深度加成：基金新增 + 筹码位置（追高/机会），合入综合分，重新排名后再取 Top N
+    # 深度加成 + 行业加成：合入精调分 score_adj，重新排名后再取 Top N。
+    # score 保留为纯因子分（价值/质量/动量/低波动），归档回测口径一致、可归因；
+    # score_adj = 纯因子分 + 行业政策加成(f_industry) + 基金/筹码/形态深检加成。
     if not deep.empty:
         deep = deep.set_index("code")
         cand = cand.copy()
@@ -254,8 +260,12 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
             lambda c: deep.loc[c, "fund_bonus"] if c in deep.index else 0.0)
         cand["chip_adj"] = cand["code"].astype(str).map(
             lambda c: deep.loc[c, "chip_adj"] if c in deep.index else 0.0)
-        cand["score"] = cand["score"] + cand["fund_bonus"] + cand["chip_adj"]
-        cand["rank"] = cand["score"].rank(ascending=False, method="first")
+        cand["pattern_adj"] = cand["code"].astype(str).map(
+            lambda c: deep.loc[c, "pattern_adj"] if c in deep.index else 0.0)
+        cand["industry_adj"] = cand["f_industry"] if "f_industry" in cand.columns else 0.0
+        cand["score_adj"] = cand["score"] + cand["industry_adj"] + cand["fund_bonus"] \
+            + cand["chip_adj"] + cand["pattern_adj"]
+        cand["rank"] = cand["score_adj"].rank(ascending=False, method="first")
         cand = cand.sort_values("rank")
         top = cand.head(cfg.top_n)
         # 只取 deep 里真实存在的 code：深检部分失败/熔断时 deep 缺行，
@@ -264,6 +274,10 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
         deep_disp = deep.loc[deep_codes].reset_index() if deep_codes else deep
     else:
         cand["fund_bonus"] = 0.0
+        cand["score_adj"] = cand["score"] + (cand["f_industry"] if "f_industry" in cand.columns else 0.0)
+        cand["rank"] = cand["score_adj"].rank(ascending=False, method="first")
+        cand = cand.sort_values("rank")
+        top = cand.head(cfg.top_n)
         deep_disp = deep
 
     print("[5/6] 回测 + 生成报告...")
@@ -291,19 +305,70 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     for k, p in paths.items():
         print(f"        {k:5s}  {p}")
     if bt.get("ok"):
-        print(f"自我检验：{bt['valid_days']} 天 | 分组差 {bt.get('spread_mean'):.2%} | "
-              f"RankIC {bt.get('ic_mean'):.3f} | ICIR {bt.get('icir'):.2f} | 多头占优 {bt.get('hit_rate'):.0%}")
+        hz = bt.get("horizons", {})
+        print(f"自我检验（{bt['days']} 交易日 · 主周期 {bt['main_horizon']}日）：")
+        for n in sorted(hz, key=int):
+            p = hz[n]
+            print(f"  {n:>2}日 分组差 {p['spread_mean']:+.2%} | RankIC {p['ic_mean']:+.3f} "
+                  f"| ICIR {p['icir']:+.2f} | 多头占优 {p['hit_rate']:.0%} | 样本 {p['valid_days']}天")
     _print_top(top)
     return top
 
 
+def _deep_backtest(cfg: Config) -> None:
+    """对已积累的深检信号(deep_*.csv)回测：验证"结构形态/筹码集中/追高/形态买点"的历史命中率。
+
+    用历史快照(含price)给每个深检信号算后 20/60 日的区间收益，分组看：
+      形态命中(yearly/platform) vs 未命中；
+      筹码高度集中(conc90<阈值) vs 未集中；
+      追高风险(chip_adj<=-0.4) vs 贴成本(chip_adj>=0.4)。
+    这是把"深检规则"本身变成可回测的信号，而非只信规则的主观直觉。
+    """
+    deep = load_deep_history(cfg)
+    if deep.empty:
+        print("尚未积累任何深检信号（deep_*.csv），每日 run 会自动存档。", file=sys.stderr)
+        return
+    snap = load_history(cfg)
+    if snap.empty:
+        print("无历史快照，无法计算后续收益。", file=sys.stderr)
+        return
+    snap = snap[["date", "code", "price"]].copy()
+    deep = deep.merge(snap, on=["date", "code"], how="left")
+    deep = deep.sort_values(["code", "date"]).copy()
+    g = deep.groupby("code", group_keys=False)
+    for n in (20, 60):
+        deep[f"fwd_{n}"] = g["price"].shift(-n) / deep["price"] - 1.0
+    fwd = "fwd_20"
+
+    def _stat(cond):
+        s = deep.loc[cond, fwd]
+        return (len(s), s.mean(), (s > 0).mean()) if len(s) else (0, np.nan, np.nan)
+
+    print(f"深检规则回测（{fwd}日区间，样本=信号命中组）：")
+    print(f"  累计 {deep['date'].nunique()} 个交易日，{len(deep)} 条深检记录\n")
+
+    def _line(name, cond):
+        n, mean, hit = _stat(cond)
+        if n:
+            print(f"  {name:<22s}  n={n:3d}  平均{fwd}日 {mean:+.1%}  胜率 {hit:.0%}")
+
+    _line("全量深检基线", deep[fwd].notna())
+    _line("  形态命中(回踩/平台)", deep.get("pattern_yearly", False).fillna(False) | deep.get("pattern_platform", False).fillna(False))
+    _line("  回踩年线", deep.get("pattern_yearly", False).fillna(False))
+    _line("  平台突破", deep.get("pattern_platform", False).fillna(False))
+    _line("  筹码集中(conc90<0.15)", (deep.get("conc90") < 0.15).fillna(False))
+    _line("  贴成本(主力浮盈小)", (deep.get("chip_adj", 0) >= 0.4))
+    _line("  追高风险(chip_adj<=-0.4)", (deep.get("chip_adj", 0) <= -0.4))
+    print("\n提示：样本量小(n<20)时胜率不稳定；持续 run 会逐步积累有效统计。")
+
+
 def _print_top(top: pd.DataFrame) -> None:
-    print("\n=== Top 组合 ===")
+    print("\n=== Top 组合（精调分 score_adj = 纯因子分 + 行业/基金/筹码/形态加成） ===")
     cols = [c for c in ["rank", "code", "name", "industry", "price", "pct",
-                        "roe", "np_yoy", "pe", "pb", "floatcap", "score"] if c in top.columns]
+                        "roe", "np_yoy", "pe", "pb", "floatcap", "score_adj", "score"] if c in top.columns]
     disp = top[cols].copy()
     disp["floatcap"] = pd.to_numeric(disp["floatcap"], errors="coerce") / 1e8
-    disp = disp.round({"floatcap": 0, "roe": 1, "pe": 1, "pb": 2, "score": 2, "pct": 2})
+    disp = disp.round({"floatcap": 0, "roe": 1, "pe": 1, "pb": 2, "score_adj": 2, "score": 2, "pct": 2})
     print(disp.to_string(index=False))
 
 
@@ -352,6 +417,7 @@ def main() -> None:
     sub.add_parser("top", help="只打印今日Top")
     sub.add_parser("history", help="列出历史天数")
     sub.add_parser("backtest", help="只跑自我检验")
+    sub.add_parser("deepbt", help="回测深检规则(筹码/形态/买点)历史命中率")
     sub.add_parser("ai", help="对已有 latest.json 重新生成 AI 解读")
     sub.add_parser("feishu", help="把已有 latest.json 结果推送到飞书机器人")
     sp = sub.add_parser("nav", help="单股近一年净值")
@@ -373,9 +439,16 @@ def main() -> None:
     elif args.cmd == "backtest":
         bt = run_backtest(cfg)
         if bt.get("ok"):
-            print(bt)
+            hz = bt.get("horizons", {})
+            print(f"自我检验（{bt['days']} 交易日 · 主周期 {bt['main_horizon']}日）：")
+            for n in sorted(hz, key=int):
+                p = hz[n]
+                print(f"  {n:>2}日 分组差 {p['spread_mean']:+.2%} | RankIC {p['ic_mean']:+.3f} "
+                      f"| ICIR {p['icir']:+.2f} | 多头占优 {p['hit_rate']:.0%} | 样本 {p['valid_days']}天")
         else:
             print(f"历史不足（{bt.get('days',0)} 天），继续每日运行即可积累。")
+    elif args.cmd == "deepbt":
+        _deep_backtest(cfg)
     elif args.cmd == "nav":
         _nav(args.code)
 

@@ -105,6 +105,22 @@ class Config:
         self.chip_bonus_dev: float = _env("CHIP_BONUS_DEV", 0.10)  # 价格贴近成本线 ±此范围内算"主力浮盈小"
         self.chip_bonus: float = _env("CHIP_BONUS", 0.6)           # 贴成本+基本面好 → 加分
         self.chip_bonus_dip: float = _env("CHIP_BONUS_DIP", 0.4)   # 主力明显浮亏+基本面好 → 加分(超跌机会)
+        # 筹码集中度（三角分布法）：90%筹码价带收窄程度。
+        # 高度集中(conc90<阈值) + 基本面好 → 主力锁仓、抛压小，给加分。
+        self.chip_conc_tight = _env("CHIP_CONC_TIGHT", 0.15)    # 90%筹码集中度低于此值视为"筹码集中"
+        self.chip_bonus_conc = _env("CHIP_BONUS_CONC", 0.4)     # 筹码集中+基本面好 → 加分
+
+        # ---- 结构形态策略（回踩年线 / 平台突破）----
+        # 作为深检的补充买点信号，命中且基本面达标时给综合分加分。
+        self.pattern_enable = _env("PATTERN_ENABLE", True)       # 是否启用结构形态策略
+        self.pattern_bonus = _env("PATTERN_BONUS", 0.3)          # 命中任一结构形态 → 加分
+        self.pattern_yearly_days = _env("PATTERN_YEARLY_DAYS", 60)   # 回踩年线回看天数
+        self.pattern_platform_days = _env("PATTERN_PLATFORM_DAYS", 60)  # 平台突破回看天数
+        # 平台突破的放量成交额门槛：深检只跑综合分前50名(已过 min_amount=5000万清洗)，
+        # 这里再叠一道绝对额会把中小盘的平台突破形态"错杀"（同样形态,30亿流通市值 2亿=6.7%
+        # 换手过热,而100亿的 2亿=2%正常）。默认 0 表示信任 min_amount、不再额外卡额；
+        # 想收紧就设 PATTERN_MIN_AMOUNT=2e8。参考：可改用相对换手率(暂未实现)。
+        self.pattern_min_amount = _env("PATTERN_MIN_AMOUNT", 0.0)     # 平台突破额外成交额下限(元)
 
         # ---- 行业 / 产业政策因子 ----
         # 命中国家规划/政策扶持的行业关键词时，给综合分加成（行业贝塔之外的产业逻辑）。
