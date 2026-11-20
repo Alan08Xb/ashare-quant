@@ -107,6 +107,35 @@ def test_feishu_card_has_ma20_and_main_cost_columns():
     assert row["buy"] == "1480.00" and row["stop"] == "1406.00"
 
 
+def test_report_code_keeps_leading_zeros():
+    """代码绝不做数值化：000498 在 markdown/HTML 里必须显示为 000498，不能变成 498。"""
+    from ashare_quant.report import _fmt_series, render_markdown, render_html
+    top = pd.DataFrame([
+        {"rank": 1, "code": "000498", "name": "山东路桥", "price": 6.5, "pct": 1.0,
+         "ret_60": 10.0, "pe": 8.0, "pb": 1.1, "roe": 15.0, "np_yoy": 20.0,
+         "gross_margin": 30.0, "mktcap": 1e9, "floatcap": 8e8, "turnover": 2.0,
+         "score": 1.0, "score_adj": 1.2},
+    ])
+    fmt = _fmt_series(top)
+    assert list(fmt["code"]) == ["000498"]                      # 前导零保留
+    assert "| 000498 |" in render_markdown(top, {}, {})          # markdown 行内代码完整
+    assert "<td>000498</td>" in render_html(top, {}, {})          # html 单元格代码完整
+
+
+def test_fetch_pool_closes_deadline_triggers(monkeypatch):
+    """as_completed 用 timeout=remaining：到点熔断，不会因最慢 future 拖死。"""
+    import time
+    from ashare_quant import fetch
+    def slow(*a, **k):
+        time.sleep(3)
+        return 1
+    monkeypatch.setattr(fetch, "fetch_kline_close", slow)   # 单只 3s，绝不让 deadline 真等它
+    t0 = time.time()
+    fetch.fetch_pool_closes(["600519"], "20260101", "20260102",
+                            concurrency=1, deadline=0.5)
+    assert (time.time() - t0) < 2.5   # 熔断在 ~0.5s 生效，没等慢 future
+
+
 def _sample_with_industry(industries, per=40) -> pd.DataFrame:
     rng = np.random.default_rng(3)
     n = len(industries) * per

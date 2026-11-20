@@ -152,6 +152,12 @@ class Config:
         self.history_dir: str = os.path.join(".", "data", "history")
         self.report_dir: str = os.path.join(".", "reports")
         self.docs_dir: str = os.path.join(".", "docs")
+        # 当日数据仓库：东财拉取任务(NAS)每日落盘，分析任务(Actions)读它出报告。
+        # 库内放当日全市场快照 + Top 深检信号 + meta/backtest + manifest（"当日是否更新"标志）。
+        self.dailydb_dir: str = os.environ.get("DAILYDB_DIR", os.path.join(".", "data", "dailydb"))
+        # 东财拉取重试：429/5xx 时停 5 分钟重试，最多 N 次（默认 5 次 × 300s = 25 分钟兜底）。
+        self.pull_retry_times: int = _env("PULL_RETRY_TIMES", 5)
+        self.pull_retry_interval: int = _env("PULL_RETRY_INTERVAL", 300)
 
     def snapshot_fields(self) -> list[str]:
         return [

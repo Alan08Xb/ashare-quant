@@ -118,6 +118,31 @@ def fetch_quality(code: str) -> dict:
     return r
 
 
+def fetch_kline(code: str, days: int = 520) -> pd.DataFrame:
+    """baostock 前复权日线（补深检技术面/筹码用）。
+    返回含 date/open/high/low/close/volume/turnover 的 DataFrame；失败/空返回空表。"""
+    sym = _sym(code)
+    end = dt.date.today()
+    beg = end - dt.timedelta(days=int(days * 1.6))   # 自然日→交易日约 1.6x 放大
+    try:
+        bs = _session()   # 登录失败→空表，绝不外抛
+        rs = bs.query_history_k_data_plus(
+            sym, "date,open,high,low,close,volume,turn",
+            start_date=beg.strftime("%Y-%m-%d"), end_date=end.strftime("%Y-%m-%d"),
+            frequency="d", adjustflag="2")
+        rows = _iter_rows(rs)
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        for c in ("open", "high", "low", "close", "volume", "turn"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["turnover"] = df["turn"]
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        return df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
 def fetch_ret60(code: str) -> float:
     """前复权日线算 60 交易日涨幅（%）。K线不足 60 行返回 NaN。"""
     sym = _sym(code)

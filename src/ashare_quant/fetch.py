@@ -283,8 +283,10 @@ def fetch_pool_closes(codes: list[str], beg: str, end: str,
     try:
         fut = {ex.submit(fetch_kline_close, c, beg, end): c for c in codes}
         t0 = time.time()
-        # 带超时的 as_completed：到点立刻熔断，不等 in-flight 请求超时
-        for f in cf.as_completed(fut, timeout=None):
+        # 带超时的 as_completed：到点立刻熔断，不等 in-flight 请求超时。
+        # timeout=None 会被最慢的 future 拖住，熔断永不触发（对应下方 TimeoutError 兜底）。
+        remaining = (deadline - (time.time() - t0)) if deadline is not None else None
+        for f in cf.as_completed(fut, timeout=remaining):
             c = fut[f]
             try:
                 s = f.result()

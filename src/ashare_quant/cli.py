@@ -22,7 +22,11 @@ import pandas as pd
 from .ai import ai_interpret, save_json_field, write_ai_report
 from .backtest import run_backtest
 from .config import Config
+from .core import apply_deep_adj, deep_with_retry
+from . import dailydb
+from . import pull
 from .deep import deep_check
+from .deep_bs import deep_check_from_baostock
 from .factors import annualized_vol, compute_factors
 from .feishu import push_latest
 from .fetch import fetch_kline, fetch_kline_close, fetch_market_snapshot, fetch_pool_closes
@@ -32,60 +36,17 @@ from .staticdb import load_static, merge_static, save_static
 from .universe import clean_universe, industry_stats
 
 
-def _eastmoney_alive(cfg: Config) -> bool:
-    """探活东财：对一只股票拉 K 线，通即为恢复（成功秒级，失败 20s 超时）。"""
-    import time
-    try:
-        end = dt.date.today()
-        beg = end - dt.timedelta(days=40)
-        k = fetch_kline("600519", beg.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
-        return not k.empty
-    except Exception:
-        return False
-
-
-def _deep_with_retry(candidates: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """深度校验，失败/为空时自动重试补深检。
-
-    东财 K线/F10 故障时 deep_check 会熔断返回空表——但那是单次调度，东财几分钟后恢复
-    也不会回头补，导致当日深检永久缺失。这里在深检为空时按 interval×times 等待重试：
-    每次先探活东财，恢复才重跑 deep_check（避免东财持续挂时整轮 600s 白跑）。
-    """
-    import time
-    def _run_once() -> pd.DataFrame:
-        try:
-            return deep_check(candidates, cfg, cfg.deep_deadline)
-        except Exception as e:
-            print(f"      !! 深度校验失败（{type(e).__name__}: {e}），本日仅输出 Top 榜单"
-                  f"（无深度信号）。", file=sys.stderr)
-            return pd.DataFrame()
-
-    deep = _run_once()
-    if not deep.empty or cfg.deep_retry_times <= 0:
-        return deep
-
-    print(f"      深检为空（东财接口故障），每 {cfg.deep_retry_interval}s 重试 "
-          f"{cfg.deep_retry_times} 次探活补深检…", file=sys.stderr)
-    for i in range(cfg.deep_retry_times):
-        time.sleep(cfg.deep_retry_interval)
-        print(f"      → 重试 {i+1}/{cfg.deep_retry_times}：探活东财…")
-        if not _eastmoney_alive(cfg):
-            print(f"         东财仍不可用，继续等待。")
-            continue
-        print(f"         东财已恢复，重跑深检…")
-        deep = _run_once()
-        if not deep.empty:
-            print(f"         深检补成功（{len(deep)} 只）")
-            break
-    if deep.empty:
-        print(f"      深检重试 {cfg.deep_retry_times} 次后仍失败，本日仅输出 Top 榜单"
-              f"（无深度信号），东财恢复后次日自动正常。", file=sys.stderr)
-    return deep
-
-
 def _run(print_top_only: bool = False) -> pd.DataFrame:
     cfg = Config()
     day = dt.date.today().strftime("%Y%m%d")
+
+    # ===== 当日数据仓库优先 =====
+    # 东财拉取任务(NAS)已在 10:00 落库当日东财数据 → 100% 从库拉取，纯本地、零网络、秒级。
+    # 库不新鲜(拉取失败/非交易日) → 走下方现有降级路径(新浪+baostock)。
+    if dailydb.is_fresh(cfg, day):
+        print(f"[run] 当日数据仓库已更新（data/dailydb/{day}/），100% 从静态库拉取…")
+        return _run_from_db(day, cfg, print_top_only)
+
     print(f"[1/6] 抓取全市场快照（{dt.datetime.now().strftime('%H:%M:%S')}）...")
     snap, source = fetch_market_snapshot(cfg.market_fs(), cfg.snapshot_fields())
     if snap.empty:
@@ -168,6 +129,8 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
                 if s is None or len(s) < 2:
                     return float("nan")
                 base = s.iloc[-61] if len(s) >= 61 else s.iloc[0]
+                if not base or base != base or base <= 0:   # 防 0/NaN 收盘 → 除零崩整段补齐
+                    return float("nan")
                 return float((s.iloc[-1] / base - 1) * 100)
             coarse["ret_60"] = coarse["code"].astype(str).map(_ret60)
             # 动量兜底：东财 K线覆盖不足时（closes 缺失）用 baostock 补 60 日涨幅，
@@ -244,7 +207,11 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     save_snapshot(first_pass, cfg, day)
 
     print(f"[4.5/6] 深度校验 Top {cfg.deep_top}（基本面/技术面/雷区/大基金）...")
-    deep = _deep_with_retry(cand.head(cfg.deep_top), cfg)
+    deep = deep_with_retry(cand.head(cfg.deep_top), cfg)
+    if deep.empty:
+        # 东财深检失败（机房 IP 屏蔽）→ 用 baostock 补简化深检（技术面/筹码/形态，基本面受限）
+        print(f"      东财深检为空，改用 baostock 补深检（{cfg.deep_top} 只）…")
+        deep = deep_check_from_baostock(cand.head(cfg.deep_top), cfg)
     print(f"      深度校验完成（{len(deep)} 只）")
     # 深检信号单独存档：供日后对“深检规则(筹码/形态/买点)历史命中率”回测
     if not deep.empty:
@@ -253,32 +220,7 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     # 深度加成 + 行业加成：合入精调分 score_adj，重新排名后再取 Top N。
     # score 保留为纯因子分（价值/质量/动量/低波动），归档回测口径一致、可归因；
     # score_adj = 纯因子分 + 行业政策加成(f_industry) + 基金/筹码/形态深检加成。
-    if not deep.empty:
-        deep = deep.set_index("code")
-        cand = cand.copy()
-        cand["fund_bonus"] = cand["code"].astype(str).map(
-            lambda c: deep.loc[c, "fund_bonus"] if c in deep.index else 0.0)
-        cand["chip_adj"] = cand["code"].astype(str).map(
-            lambda c: deep.loc[c, "chip_adj"] if c in deep.index else 0.0)
-        cand["pattern_adj"] = cand["code"].astype(str).map(
-            lambda c: deep.loc[c, "pattern_adj"] if c in deep.index else 0.0)
-        cand["industry_adj"] = cand["f_industry"] if "f_industry" in cand.columns else 0.0
-        cand["score_adj"] = cand["score"] + cand["industry_adj"] + cand["fund_bonus"] \
-            + cand["chip_adj"] + cand["pattern_adj"]
-        cand["rank"] = cand["score_adj"].rank(ascending=False, method="first")
-        cand = cand.sort_values("rank")
-        top = cand.head(cfg.top_n)
-        # 只取 deep 里真实存在的 code：深检部分失败/熔断时 deep 缺行，
-        # 直接 .loc[list] 会 KeyError。缺失的让报告侧自行降级显示。
-        deep_codes = [c for c in top["code"].astype(str) if c in deep.index]
-        deep_disp = deep.loc[deep_codes].reset_index() if deep_codes else deep
-    else:
-        cand["fund_bonus"] = 0.0
-        cand["score_adj"] = cand["score"] + (cand["f_industry"] if "f_industry" in cand.columns else 0.0)
-        cand["rank"] = cand["score_adj"].rank(ascending=False, method="first")
-        cand = cand.sort_values("rank")
-        top = cand.head(cfg.top_n)
-        deep_disp = deep
+    top, deep_disp = apply_deep_adj(cand, deep, cfg)
 
     print("[5/6] 回测 + 生成报告...")
     bt = run_backtest(cfg)
@@ -315,6 +257,40 @@ def _run(print_top_only: bool = False) -> pd.DataFrame:
     return top
 
 
+def _run_from_db(day: str, cfg: Config, print_top_only: bool) -> pd.DataFrame:
+    """当日数据仓库已更新 → 100% 从库拉取，纯本地渲染（零网络、秒级）。"""
+    data = dailydb.load_day(cfg, day)
+    top, deep, meta, bt = data["top"], data["deep"], data["meta"], data["backtest"]
+    if top.empty:
+        print("!! 数据仓库 manifest=success 但 top 为空（落盘不完整），无法出报告。",
+              file=sys.stderr)
+        return pd.DataFrame()
+    if print_top_only:
+        _print_top(top)
+        return top
+    # AI 解读（可选）：从库里的 top/deep 重新生成，不重跑抓数
+    ai_text = ""
+    if cfg.ai_api_key:
+        print("[run] AI 解读（读库数据）...")
+        ai_text = ai_interpret(cfg, top.to_dict(orient="records"),
+                               deep.to_dict(orient="records") if not deep.empty else [], meta)
+        if ai_text:
+            write_ai_report(cfg, ai_text)
+    paths = write_reports(top, meta, bt, cfg, deep, ai_text)
+    print("      报告已写入：")
+    for k, p in paths.items():
+        print(f"        {k:5s}  {p}")
+    if bt.get("ok"):
+        hz = bt.get("horizons", {})
+        print(f"自我检验（{bt['days']} 交易日 · 主周期 {bt['main_horizon']}日）：")
+        for n in sorted(hz, key=int):
+            p = hz[n]
+            print(f"  {n:>2}日 分组差 {p['spread_mean']:+.2%} | RankIC {p['ic_mean']:+.3f} "
+                  f"| ICIR {p['icir']:+.2f} | 多头占优 {p['hit_rate']:.0%} | 样本 {p['valid_days']}天")
+    _print_top(top)
+    return top
+
+
 def _deep_backtest(cfg: Config) -> None:
     """对已积累的深检信号(deep_*.csv)回测：验证"结构形态/筹码集中/追高/形态买点"的历史命中率。
 
@@ -333,11 +309,16 @@ def _deep_backtest(cfg: Config) -> None:
         print("无历史快照，无法计算后续收益。", file=sys.stderr)
         return
     snap = snap[["date", "code", "price"]].copy()
-    deep = deep.merge(snap, on=["date", "code"], how="left")
-    deep = deep.sort_values(["code", "date"]).copy()
-    g = deep.groupby("code", group_keys=False)
-    for n in (20, 60):
-        deep[f"fwd_{n}"] = g["price"].shift(-n) / deep["price"] - 1.0
+    # 用"该 code 的完整快照序列"对齐后 N 个交易日收益，而不是稀疏的深检记录序列。
+    # 深检只覆盖 Top50，同一 code 在 deep 序列里隔几天才出现一次，shift(-N) 会跨更多自然日；
+    # 改按全市场快照逐 code 排日序，取第 N 个交易日后的收盘，口径与主回测一致。
+    snap = snap.sort_values(["code", "date"])
+    snap["fwd20_price"] = snap.groupby("code")["price"].shift(-20)
+    snap["fwd60_price"] = snap.groupby("code")["price"].shift(-60)
+    deep = deep.merge(snap[["date", "code", "price", "fwd20_price", "fwd60_price"]],
+                      on=["date", "code"], how="left")
+    deep["fwd_20"] = deep["fwd20_price"] / deep["price"] - 1.0
+    deep["fwd_60"] = deep["fwd60_price"] / deep["price"] - 1.0
     fwd = "fwd_20"
 
     def _stat(cond):
@@ -414,6 +395,7 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="ashare-quant", description="A股多因子选股")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run", help="完整运行")
+    sub.add_parser("pull", help="东财拉取任务(NAS 10:00)：抓东财落库 data/dailydb")
     sub.add_parser("top", help="只打印今日Top")
     sub.add_parser("history", help="列出历史天数")
     sub.add_parser("backtest", help="只跑自我检验")
@@ -427,6 +409,8 @@ def main() -> None:
     cfg = Config()
     if args.cmd == "run":
         _run(print_top_only=False)
+    elif args.cmd == "pull":
+        sys.exit(pull.pull(cfg))
     elif args.cmd == "top":
         _run(print_top_only=True)
     elif args.cmd == "ai":

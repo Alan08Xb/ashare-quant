@@ -1,13 +1,12 @@
 name: daily-a-share-quant
 
 on:
-  schedule:
-    # 每个交易日早上 09:45（北京时间 = UTC 01:45）运行
-    # 注意：09:15 集合竞价刚开盘，快照接口的“最新价”字段可能仍为空导致清洗后 0 只，
-    #       推迟到 09:45 连续竞价数据稳定后再跑。cron 周一至周五(1-5)，
-    #       节假日因“无数据”自然跳过（"无数据"时步骤退出、不推送、不提交）。
-    - cron: '45 1 * * 1-5'
-  workflow_dispatch: {}   # 允许在 Actions 页手动点击运行
+  # 触发来源：NAS Hermes cron（每个交易日 10:00）先跑东财拉取任务落库 data/dailydb/，
+  # 再 workflow_dispatch 触发本分析任务。分析任务先查当日数据仓库：新鲜则 100% 从库拉取
+  # （纯本地、秒级）；不新鲜（东财拉取失败）则降级新浪+baostock。
+  # 注意：不再用 GitHub schedule——它对不活跃仓库会延迟 7-8 小时（曾导致每天 17:00-18:00
+  # 才推送）。统一由 NAS 准点 dispatch。
+  workflow_dispatch: {}   # 允许在 Actions 页手动点击运行，也由 NAS 定时触发
 
 permissions:
   contents: write   # 推送报告/历史数据到仓库

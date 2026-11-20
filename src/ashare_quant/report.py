@@ -13,7 +13,6 @@ from .config import Config
 
 FMT = {
     "rank": "int",
-    "code": "int",
     "price": "{:.2f}",
     "pct": "{:+.2f}%",
     "ret_60": "{:+.1f}%",
@@ -32,6 +31,9 @@ FMT = {
 
 def _fmt_series(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    # 代码恒为 6 位字符串，绝不做数值化（否则 000498 → "498" 丢前导零）
+    if "code" in out.columns:
+        out["code"] = out["code"].astype(str).str.zfill(6)
     for c, f in FMT.items():
         if c in out.columns:
             s = pd.to_numeric(out[c], errors="coerce")
