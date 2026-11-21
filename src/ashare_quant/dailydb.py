@@ -81,6 +81,28 @@ def save_day(cfg, date: str, *, snapshot: pd.DataFrame,
     mark_status(cfg, date, "success", "eastmoney", meta, meta.get("universe", ""))
 
 
+def prune_old(cfg, keep_date: str) -> None:
+    """删除当日之外的历史 dailydb 日期目录，防仓库逐年膨胀。
+    回测历史在 NAS 本地 data/history（gitignored）积累，Actions 只需当日 dailydb。"""
+    import shutil
+    base = cfg.dailydb_dir
+    if not os.path.isdir(base):
+        return
+    for name in os.listdir(base):
+        p = os.path.join(base, name)
+        if name != keep_date and name.isdigit() and os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def load_snapshot(cfg, date: str) -> pd.DataFrame:
+    """读当日全市场一阶段因子表（snapshot.csv）。不存在/损坏返回空表。"""
+    p = os.path.join(day_dir(cfg, date), "snapshot.csv")
+    try:
+        return pd.read_csv(p, dtype={"code": str})
+    except Exception:
+        return pd.DataFrame()
+
+
 def load_day(cfg, date: str) -> dict:
     """分析任务读当日仓库。缺文件返回对应空值（不报错）。"""
     d = day_dir(cfg, date)

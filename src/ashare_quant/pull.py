@@ -116,6 +116,11 @@ def pull(cfg: Config | None = None) -> int:
     # 6) 东财深检 Top（本地 IP，可连东财；失败自动重试补深检）
     print(f"[pull] 深检 Top {cfg.deep_top}…")
     deep = core.deep_with_retry(cand.head(cfg.deep_top), cfg)
+    if deep.empty:
+        # 东财深检失败 → baostock 兜底，保证当日数据仓库的 deep 尽量非空（分析侧 100% 从库拉取）
+        print(f"      [pull] 东财深检为空，改用 baostock 补深检（{cfg.deep_top} 只）…")
+        from .deep_bs import deep_check_from_baostock
+        deep = deep_check_from_baostock(cand.head(cfg.deep_top), cfg)
     print(f"      深检完成（{len(deep)} 只）")
     top, deep_disp = core.apply_deep_adj(cand, deep, cfg)
 
@@ -137,9 +142,10 @@ def pull(cfg: Config | None = None) -> int:
         "degraded": False,
     }
 
-    # 10) 全部落盘 + manifest=success
+    # 10) 全部落盘 + manifest=success；仓库瘦身：只保留当日 dailydb
     dailydb.save_day(cfg, day, snapshot=first_pass, top=top,
                      deep=deep_disp, meta=meta, backtest=bt)
+    dailydb.prune_old(cfg, day)
     print(f"[pull] ✅ 数据仓库已更新：data/dailydb/{day}/ "
           f"(top {len(top)} / deep {len(deep_disp)} / 用时 {time.time()-t0:.0f}s)")
     return 0

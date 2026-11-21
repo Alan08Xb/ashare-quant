@@ -107,3 +107,51 @@ def test_deep_bs_serial_deadline(tmp_path, monkeypatch):
     out = deep_check_from_baostock(cand, cfg, deadline=300.0)
     assert len(out) == 3              # 全部成功（mock 即时返回）
     assert list(out["code"]) == ["600519", "000001", "300750"]
+
+
+def test_dailydb_prune_old_keeps_only_today(tmp_path):
+    cfg = _cfg(str(tmp_path))
+    day = dt.date.today().strftime("%Y%m%d")
+    old = "20260101"
+    for d in (old, day):
+        os.makedirs(os.path.join(cfg.dailydb_dir, d), exist_ok=True)
+    dailydb.prune_old(cfg, day)
+    assert os.path.isdir(os.path.join(cfg.dailydb_dir, day))
+    assert not os.path.exists(os.path.join(cfg.dailydb_dir, old))
+
+
+def test_dailydb_load_snapshot_roundtrip(tmp_path):
+    cfg = _cfg(str(tmp_path))
+    day = dt.date.today().strftime("%Y%m%d")
+    snap = pd.DataFrame({"code": ["000498"], "score": [1.0]})
+    dailydb.save_day(cfg, day, snapshot=snap, top=snap, deep=None, meta={}, backtest={})
+    loaded = dailydb.load_snapshot(cfg, day)
+    assert list(loaded["code"]) == ["000498"]             # 前导零保留
+    assert dailydb.load_snapshot(cfg, "20300101").empty    # 不存在返回空表
+
+
+def test_run_from_db_deep_fill_when_empty(tmp_path, monkeypatch):
+    """库快照新鲜但深检为空 → _run_from_db 用 baostock 补深检并重排（print_top_only 分支）。"""
+    from ashare_quant import cli
+    cfg = _cfg(str(tmp_path))
+    day = dt.date.today().strftime("%Y%m%d")
+    snap = pd.DataFrame({
+        "code": ["600519", "000498"], "name": ["茅台", "路桥"],
+        "industry": ["白酒", "基建"], "price": [1500.0, 6.5], "pct": [1.0, 0.5],
+        "ret_60": [8.0, 5.0], "roe": [30.0, 15.0], "np_yoy": [15.0, 20.0],
+        "gross_margin": [90.0, 12.0], "pe": [30.0, 8.0], "pb": [8.0, 1.1],
+        "floatcap": [2e10, 8e8], "turnover": [0.5, 2.0], "score": [3.0, 1.0],
+        "score_adj": [3.0, 1.0], "rank": [1, 2], "f_industry": [0.5, 0.0],
+    })
+    dailydb.save_day(cfg, day, snapshot=snap, top=snap, deep=None,
+                     meta={"source": "eastmoney", "universe": "x", "degraded": False},
+                     backtest={"ok": False, "days": 0})
+    assert dailydb.is_fresh(cfg, day) is True
+    # mock 补深检：给出一行
+    fake_deep = pd.DataFrame({"code": ["600519"], "name": ["茅台"], "buy": [1480.0],
+                              "stop": [1406.0], "ma20": [1495.5], "main_cost": [1470.25],
+                              "chip_adj": [0.4], "pattern_adj": [0.3],
+                              "rec": ["优选·形态买点✓"], "badges": ["多头排列"]})
+    monkeypatch.setattr("ashare_quant.cli.deep_check_from_baostock", lambda c, cfg2: fake_deep)
+    out = cli._run_from_db(day, cfg, print_top_only=True)
+    assert list(out["code"]) == ["600519", "000498"]       # print_top_only 只打印，不崩

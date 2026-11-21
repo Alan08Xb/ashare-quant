@@ -268,6 +268,16 @@ def _run_from_db(day: str, cfg: Config, print_top_only: bool) -> pd.DataFrame:
     if print_top_only:
         _print_top(top)
         return top
+    # 深检兜底：库快照新鲜但深检为空（拉取时东财+baostock 深检都失败）→ 按规格补深检。
+    # Actions 东财被屏蔽，直接 baostock（快）；补到则用库 snapshot 重建 cand 重排。
+    if deep.empty:
+        print("[run] 库深检为空（拉取时失败），用 baostock 补深检…")
+        snap = dailydb.load_snapshot(cfg, day)
+        if not snap.empty:
+            cand = snap.sort_values("rank").head(max(cfg.top_n, cfg.deep_top))
+            deep = deep_check_from_baostock(cand.head(cfg.deep_top), cfg)
+            if not deep.empty:
+                top, deep = apply_deep_adj(cand, deep, cfg)
     # AI 解读（可选）：从库里的 top/deep 重新生成，不重跑抓数
     ai_text = ""
     if cfg.ai_api_key:
