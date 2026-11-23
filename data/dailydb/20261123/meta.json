@@ -1,0 +1,14 @@
+{
+  "source": "eastmoney",
+  "universe": "5565 → 1582 只 | 行业数 119 | 市值中位数 112 亿",
+  "w_value": 1.0,
+  "w_quality": 1.5,
+  "w_momentum": 1.0,
+  "w_lowvol": 0.5,
+  "size_neutral": true,
+  "topn": 50,
+  "vol_days": 60,
+  "fund_bonus_new": 0.5,
+  "exclude_industry": "地产,房地产",
+  "degraded": false
+}
