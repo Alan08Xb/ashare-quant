@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "days": 3,
+  "horizons": {
+    "1": {
+      "valid_days": 2,
+      "top_mean": -0.00606797232172155,
+      "bottom_mean": -0.008052991470302001,
+      "spread_mean": 0.001985019148580451,
+      "ic_mean": -0.02847530769495446,
+      "icir": NaN,
+      "hit_rate": 0.5
+    }
+  },
+  "main_horizon": 1,
+  "valid_days": 2,
+  "n_cross": 1538,
+  "top_mean": -0.00606797232172155,
+  "bottom_mean": -0.008052991470302001,
+  "spread_mean": 0.001985019148580451,
+  "ic_mean": -0.02847530769495446,
+  "icir": NaN,
+  "hit_rate": 0.5
+}
